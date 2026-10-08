@@ -75,6 +75,8 @@ interface ExecuteTurnConfig {
 	 * no execution record.
 	 */
 	onBeforeFinalize?: (outcome: AgentTurnFinalizeOutcome) => Promise<void>;
+	/** Called once with the recorder of the turn, so that a host can record its own events. */
+	onRecorderCreated?: (recorder: ExecutionRecorder) => void;
 }
 
 interface TurnExecutionState {
@@ -138,6 +140,7 @@ export class AgentTurnExecutionService {
 			config.backgroundJobSignal,
 			config.admittedExecution?.startedAt,
 		);
+		config.onRecorderCreated?.(recorder);
 
 		try {
 			turn = await config.prepare();
