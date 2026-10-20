@@ -9,10 +9,11 @@ import type {
 	TokenUsage,
 } from '../../types/sdk/agent';
 import type { AgentDbMessage } from '../../types/sdk/message';
-import { getModelIdString } from '../../utils/model';
+import type { BilledUsageCollector } from '../../types/runtime/agent-runtime';
+import { getModelIdString, isGatewayManagedModel } from '../../utils/model';
 import { createFilteredLogger } from '../logger';
 import { incrementTokenCountFromUsage } from '../loop/execution-counter';
-import { computeSideCallCost } from '../loop/side-call-cost';
+import { computeSideCallCost, costOnlyUsage } from '../loop/side-call-cost';
 import { loadAi } from '../model/lazy-ai';
 import { createModel, type FetchFn } from '../model/model-factory';
 import { toTokenUsage } from '../streaming/stream';
@@ -241,6 +242,12 @@ export async function generateThreadTitle(opts: {
 	onSideCallUsage?: (report: SideCallUsageReport) => void | Promise<void>;
 	/** Agent prompt-caching config, used to resolve Anthropic cache-write pricing for the title model. */
 	promptCaching?: PromptCachingConfig;
+	/**
+	 * Provider-billed cost source. When the title model is gateway-managed, the
+	 * call opens its own window so its billed cost never mixes with another
+	 * in-flight call; the settled amount wins over the catalog estimate.
+	 */
+	billedUsage?: BilledUsageCollector;
 }): Promise<void> {
 	try {
 		const thread = await opts.memory.getThread(opts.threadId);
@@ -256,12 +263,32 @@ export async function generateThreadTitle(opts: {
 		if (!userText) return;
 
 		const titleModelId = opts.titleConfig.model ?? opts.agentModel;
-		const titleModel = createModel(titleModelId, opts.modelFetch);
+		const window = isGatewayManagedModel(titleModelId)
+			? opts.billedUsage?.startWindow()
+			: undefined;
+		const titleModel = createModel(
+			titleModelId,
+			window ? window.wrap(opts.modelFetch) : opts.modelFetch,
+		);
 		const generated = await generateTitleAndEmojiFromMessage(titleModel, userText, {
 			instructions: opts.titleConfig.instructions,
 			executionCounter: opts.executionCounter,
 		});
-		if (!generated) return;
+		// Settle right after the model call: a billed no-answer call still cost
+		// the wallet, and a billed call without token usage still carries a cost.
+		const billedCostUsd = window?.settle();
+		if (!generated) {
+			if (billedCostUsd !== undefined && opts.onSideCallUsage) {
+				await reportTitleUsage(
+					opts.onSideCallUsage,
+					getModelIdString(titleModelId),
+					costOnlyUsage(billedCostUsd),
+					opts.promptCaching,
+					billedCostUsd,
+				);
+			}
+			return;
+		}
 
 		const { title, emoji, usage } = generated;
 
@@ -273,12 +300,15 @@ export async function generateThreadTitle(opts: {
 		// breaks title generation. Awaited (not fire-and-forget) so the cost is
 		// captured deterministically before generateThreadTitle resolves, while
 		// still best-effort: reportTitleUsage swallows its own errors.
-		if (usage && opts.onSideCallUsage) {
+		const reportUsage =
+			usage ?? (billedCostUsd !== undefined ? costOnlyUsage(billedCostUsd) : undefined);
+		if (reportUsage && opts.onSideCallUsage) {
 			await reportTitleUsage(
 				opts.onSideCallUsage,
 				getModelIdString(titleModelId),
-				usage,
+				reportUsage,
 				opts.promptCaching,
+				billedCostUsd,
 			);
 		}
 
@@ -300,17 +330,19 @@ export async function generateThreadTitle(opts: {
 }
 
 /**
- * Price a title-generation model turn and forward it to the host. Best-effort:
- * a catalog lookup or host failure is logged and never breaks title generation.
+ * Price a title-generation model turn and forward it to the host. A billed
+ * amount from the gateway wins over the catalog estimate. Best-effort: a
+ * catalog lookup or host failure is logged and never breaks title generation.
  */
 async function reportTitleUsage(
 	onSideCallUsage: (report: SideCallUsageReport) => void | Promise<void>,
 	modelId: string,
 	usage: TokenUsage,
 	promptCaching?: PromptCachingConfig,
+	billedCostUsd?: number,
 ): Promise<void> {
 	try {
-		const cost = await computeSideCallCost(modelId, usage, promptCaching);
+		const cost = billedCostUsd ?? (await computeSideCallCost(modelId, usage, promptCaching));
 		if (cost === undefined) return;
 		await onSideCallUsage({
 			task: 'title',

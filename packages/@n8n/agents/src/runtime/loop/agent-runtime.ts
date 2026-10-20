@@ -50,7 +50,7 @@ import type {
 } from '../../types/sdk/agent';
 import type { GuardrailStop } from '../../types/sdk/guardrail';
 import type { AgentMessage, ContentToolCall } from '../../types/sdk/message';
-import { getModelIdString } from '../../utils/model';
+import { getModelIdString, isGatewayManagedModel } from '../../utils/model';
 import { removeToolResultRun } from '../../workspace';
 import { GuardrailRunner } from '../guardrails/guardrail-runner';
 import { createFilteredLogger } from '../logger';
@@ -58,7 +58,9 @@ import { MemoryOrchestrator } from '../memory/memory-orchestrator';
 import { sanitizeOffloadedToolResultsForMemory } from '../memory/tool-result-memory';
 import { generateThreadTitle } from '../memory/title-generation';
 import { AgentMessageList, type SerializedMessageList } from '../model/message-list';
+import { createModel } from '../model/model-factory';
 import { createModelTokenCounter } from '../model/model-token-counter';
+import { costOnlyUsage } from './side-call-cost';
 import { getEffectiveAnthropicCacheTtl } from '../model/prompt-cache';
 import { ActiveSkills } from '../skills/active-skills';
 import { activateSkillDependencyTools } from '../skills/skill-dependency-tools';
@@ -146,6 +148,8 @@ interface PreparedLoopContext extends LoopContext {
 
 interface LoopState {
 	totalUsage: TokenUsage | undefined;
+	/** Summed gateway-billed USD across this run's turns; drives the run's aggregate cost. */
+	totalBilledUsd?: number;
 	lastFinishReason: FinishReason;
 	structuredOutput: unknown;
 	maxIterations: number;
@@ -773,6 +777,7 @@ export class AgentRuntime {
 			titleConfig: this.config.titleGeneration,
 			agentModel: this.config.model,
 			modelFetch: this.config.modelFetch,
+			...(this.config.billedUsage !== undefined ? { billedUsage: this.config.billedUsage } : {}),
 			turnDelta: list.turnDelta(),
 			executionCounter: options.executionCounter,
 			onSideCallUsage: options.onSideCallUsage,
@@ -828,7 +833,7 @@ export class AgentRuntime {
 				return await sink.finishSuspended({
 					suspendRunId: this.runId,
 					list: prepared.list,
-					usage: state.totalUsage,
+					usage: this.totalUsageWithBilled(state),
 					suspensions: [],
 					finishReason: 'paused',
 				});
@@ -849,7 +854,7 @@ export class AgentRuntime {
 			list: ctx.list,
 			options: ctx.options,
 			finishReason: state.lastFinishReason,
-			usage: state.totalUsage,
+			usage: this.totalUsageWithBilled(state),
 			structuredOutput: state.structuredOutput,
 			guardrail: state.guardrailStop,
 		});
@@ -1111,7 +1116,22 @@ export class AgentRuntime {
 					return undefined;
 				}
 			}
-			const turn = await sink.callModel(modelCallContext);
+			// A gateway-managed call gets its own model instance on a windowed
+			// transport, so only this call's responses settle its billed cost.
+			const window = this.startBilledWindow();
+			const turn = window
+				? await sink.callModel({
+						...modelCallContext,
+						model: createModel(this.config.model, window.wrap(this.config.modelFetch)),
+					})
+				: await sink.callModel(modelCallContext);
+			const billed = window?.settle();
+			// The gateway bills the call whether or not the provider returned
+			// token counts, so a billed-only call still carries a cost.
+			if (billed !== undefined) {
+				state.totalBilledUsd = (state.totalBilledUsd ?? 0) + billed;
+				turn.usage = turn.usage ? { ...turn.usage, cost: billed } : costOnlyUsage(billed);
+			}
 			// Price the turn before guardrails see it. The finish chunk prices
 			// the summed tokens later; mergeUsage drops per-turn cost.
 			turn.usage = this.applyCost(turn.usage);
@@ -1139,7 +1159,23 @@ export class AgentRuntime {
 	): void {
 		state.totalUsage = mergeUsage(state.totalUsage, turn.usage);
 		incrementTokenCountFromUsage(ctx.options?.executionCounter, turn.usage);
-		sink.reportUsage(state.totalUsage);
+		sink.reportUsage(state.totalUsage, state.totalBilledUsd);
+	}
+
+	/**
+	 * The run's aggregate usage with the summed gateway-billed USD stamped on.
+	 * `mergeUsage` drops per-turn cost, so without this the aggregate would be
+	 * re-priced from the catalog instead of carrying what the gateway charged.
+	 * Unset when no turn reported a billed amount — the estimate then applies.
+	 */
+	private totalUsageWithBilled(state: LoopState): TokenUsage | undefined {
+		if (state.totalBilledUsd === undefined) return state.totalUsage;
+		const base = state.totalUsage ?? {
+			promptTokens: 0,
+			completionTokens: 0,
+			totalTokens: 0,
+		};
+		return { ...base, cost: state.totalBilledUsd };
 	}
 
 	private async finishToolBatch<T>(
@@ -1173,7 +1209,7 @@ export class AgentRuntime {
 			const result = await sink.finishSuspended({
 				suspendRunId: this.runId,
 				list,
-				usage: state.totalUsage,
+				usage: this.totalUsageWithBilled(state),
 				suspensions: batch.suspensions,
 			});
 			this.assertNotAborted(abortScope);
@@ -1418,6 +1454,24 @@ export class AgentRuntime {
 		return getModelIdString(this.config.model);
 	}
 
+	/**
+	 * Whether the model credential resolves through the AI gateway. Only these
+	 * models keep a provider-reported cost and read the billed-usage collector.
+	 */
+	private get gatewayManaged(): boolean {
+		return isGatewayManagedModel(this.config.model);
+	}
+
+	/**
+	 * Opens a billed-cost window for one model call. Only gateway-managed
+	 * models with a configured collector bill from the provider response;
+	 * every other call keeps the catalog estimate.
+	 */
+	private startBilledWindow() {
+		if (!this.gatewayManaged) return undefined;
+		return this.config.billedUsage?.startWindow();
+	}
+
 	/** Fetch model cost from catalog. Retries on subsequent calls if the catalog was unavailable. */
 	private async ensureModelCost(): Promise<ModelCost | undefined> {
 		if (this.modelCost) return this.modelCost;
@@ -1429,9 +1483,16 @@ export class AgentRuntime {
 		return this.modelCost;
 	}
 
-	/** Apply cost to a TokenUsage object using catalog pricing. */
+	/**
+	 * Apply cost to a TokenUsage object using catalog pricing. A gateway-managed
+	 * model keeps a cost the call already carries (the provider-billed amount
+	 * the gateway returned); every other model is priced from the catalog, even
+	 * when the provider reported a cost of its own.
+	 */
 	private applyCost(usage: TokenUsage | undefined): TokenUsage | undefined {
-		if (!usage || !this.modelCost) return usage;
+		if (!usage) return usage;
+		if (this.gatewayManaged && usage.cost !== undefined) return usage;
+		if (!this.modelCost) return usage;
 		const anthropicCacheTtl = getEffectiveAnthropicCacheTtl(
 			this.config.promptCaching,
 			this.modelIdString,

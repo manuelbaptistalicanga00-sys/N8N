@@ -95,6 +95,7 @@ import { findWorkflowToolWorkflow } from './tools/workflow-tool-workflow-resolve
 import { WorkflowToolWorkflowLoader } from './tools/workflow-tool-workflow-loader.service';
 import type { AgentRunSource } from './utils/agent-published-snapshot';
 import { getAgentRuntimeAssets, type AgentRuntimeAssets } from './utils/agent-runtime-assets';
+import { createBilledUsageCollector } from './utils/billed-usage-collector';
 import { resolveUniqueSubAgents } from './utils/sub-agent-resolver';
 /**
  * `inline` runs an agent defined in a workflow node's parameters: no entity
@@ -116,6 +117,12 @@ export interface ReconstructedAgentRuntime {
 	 * preflight.
 	 */
 	modelCredentialGatewayManaged?: boolean;
+	/**
+	 * The main model credential is the n8n-managed free OpenAI credits
+	 * credential: the run bills the owner's AI credits quota through the AI
+	 * service proxy, so the budget guardrail also preflights that quota.
+	 */
+	modelCredentialFreeAiCredits?: boolean;
 }
 
 export interface SubAgentDelegationConfig {
@@ -602,6 +609,7 @@ export class AgentRuntimeReconstructionService {
 			parentAgentIdForDelegation: options.parentAgentIdForDelegation ?? options.memoryOwnerAgentId,
 			backgroundTasksEnabled,
 		});
+		const modelCredentialFreeAiCredits = await this.probeFreeAiCreditsCredential(options);
 		return {
 			agent: runtime.agent,
 			toolRegistry: buildToolRegistry(runtime.resolvedTools),
@@ -612,7 +620,29 @@ export class AgentRuntimeReconstructionService {
 			...(options.config.credential === AI_GATEWAY_MANAGED_TAG
 				? { modelCredentialGatewayManaged: true }
 				: {}),
+			...(modelCredentialFreeAiCredits ? { modelCredentialFreeAiCredits: true } : {}),
 		};
+	}
+
+	/**
+	 * Whether the main model credential is the n8n-managed free OpenAI credits
+	 * credential. Best-effort: a failed probe never blocks the build — the
+	 * proxy stays the hard stop on an exhausted quota.
+	 */
+	private async probeFreeAiCreditsCredential(
+		options: RuntimeReconstructionOptions,
+	): Promise<boolean> {
+		const credentialId = options.config.credential;
+		if (!credentialId || credentialId === AI_GATEWAY_MANAGED_TAG) return false;
+		const provider = options.credentialProvider;
+		if (!('isFreeAiCreditsCredential' in provider)) return false;
+		try {
+			return await (
+				provider as { isFreeAiCreditsCredential: (id: string) => Promise<boolean> }
+			).isFreeAiCreditsCredential(credentialId);
+		} catch {
+			return false;
+		}
 	}
 
 	private async buildConfiguredRuntime(
@@ -643,6 +673,11 @@ export class AgentRuntimeReconstructionService {
 		const aiMcpFetch = instrumentation?.mcpFetch ?? createAiMcpFetch(this.outboundHttp);
 		const webSearchFetch = createWebSearchFetch(this.outboundHttp);
 		const buildMcpClient = this.makeMcpClientFactory(options, aiMcpFetch, mcpServerAttributions);
+		// Gateway-managed models bill from the gateway's per-call cost header.
+		// One collector per runtime: every model call opens its own window, so a
+		// fire-and-forget side call can never leak its cost into the next turn.
+		const billedUsage =
+			config.credential === AI_GATEWAY_MANAGED_TAG ? createBilledUsageCollector() : undefined;
 		const reconstructed = await buildFromJson(config, toolDescriptors, {
 			toolExecutor,
 			credentialProvider,
@@ -657,6 +692,7 @@ export class AgentRuntimeReconstructionService {
 			resolveManagedEmbeddingProviderOptions: async () =>
 				await this.resolveManagedEmbeddingProviderOptions(projectId),
 			modelFetch: instrumentation?.modelFetch ?? aiProxyFetch,
+			...(billedUsage !== undefined ? { billedUsage } : {}),
 			fallbackWebSearch: instrumentation?.webSearch,
 			// Only the mock MCP transport makes attaching auth-pending servers safe.
 			attachAuthPendingMcpServers: instrumentation?.mcpFetch !== undefined,

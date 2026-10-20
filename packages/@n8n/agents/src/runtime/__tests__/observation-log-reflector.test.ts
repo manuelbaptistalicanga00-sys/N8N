@@ -3,6 +3,8 @@ import type * as AiImport from 'ai';
 
 import type { ObservationLogEntry } from '../../types/sdk/observation-log';
 import type { BuiltTelemetry } from '../../types/telemetry';
+import type { BilledUsageCollector, BilledUsageWindow } from '../../types/runtime/agent-runtime';
+import type { FetchFn } from '../model/model-factory';
 import { InMemoryMemory } from '../memory/memory-store';
 import {
 	buildObservationLogReflectorPrompt,
@@ -355,6 +357,38 @@ describe('observation-log reflector defaults', () => {
 				reportId: expect.any(String),
 			}),
 		);
+	});
+
+	it('forwards the billed cost on a zero-token record when a gateway reflector call reports no usage', async () => {
+		mockGenerateText.mockResolvedValue({ text: '{"drop":[],"merge":[]}' });
+		const window: BilledUsageWindow = {
+			wrap: vi.fn((fetch?: FetchFn) => fetch ?? ((async () => new Response()) as FetchFn)),
+			settle: vi.fn(() => 0.002),
+		};
+		const collector: BilledUsageCollector = { startWindow: vi.fn(() => window) };
+		const onUsage = vi.fn();
+
+		const result = await createObservationLogReflectFn(
+			{ id: 'openai/gpt-4o-mini', gatewayManaged: true },
+			{ onUsage, billedUsage: collector },
+		)({
+			observationScopeId: 'thread-1',
+			now: new Date('2026-05-12T14:30:00.000Z'),
+			activeObservationLog: [],
+			renderedObservationLog: '',
+			tokenCount: 10,
+			tokenBudget: 12_000,
+		});
+
+		expect(collector.startWindow).toHaveBeenCalledTimes(1);
+		expect(onUsage).toHaveBeenCalledWith(
+			expect.objectContaining({
+				task: 'reflector',
+				usage: expect.objectContaining({ promptTokens: 0, cost: 0.002 }),
+				billedCostUsd: 0.002,
+			}),
+		);
+		expect(result).toMatchObject({ billedCostUsd: 0.002 });
 	});
 });
 

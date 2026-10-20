@@ -55,7 +55,7 @@ function isLanguageModel(config: unknown): config is LanguageModel {
  */
 const globalFetch: FetchFn = async (input, init) => await globalThis.fetch(input, init);
 
-function getProxyFetch(): FetchFn | undefined {
+export function getProxyFetch(): FetchFn | undefined {
 	const proxyUrl = process.env.HTTPS_PROXY ?? process.env.HTTP_PROXY;
 	if (!proxyUrl) return undefined;
 
