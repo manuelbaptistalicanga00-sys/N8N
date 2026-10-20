@@ -1,4 +1,6 @@
 import { MAX_CONNECTION_INDEX } from '../src/common';
+import { NODE_ID_MAX_LENGTH } from '@n8n/constants';
+
 import {
 	safeParseWorkflowStructure,
 	parseWorkflowStructure,
@@ -267,6 +269,42 @@ describe('workflow-structure-validation', () => {
 			expect.objectContaining({ code: 'duplicate_node_id', path: ['nodes', 1, 'id'] }),
 			expect.objectContaining({ code: 'duplicate_node_name', path: ['nodes', 1, 'name'] }),
 		]);
+	});
+
+	test('rejects a node id longer than NODE_ID_MAX_LENGTH', () => {
+		const result = safeParseWorkflowStructure({
+			...validWorkflow,
+			nodes: [
+				validWorkflow.nodes[0],
+				{ ...validWorkflow.nodes[1], id: 'n'.repeat(NODE_ID_MAX_LENGTH + 1) },
+			],
+		});
+
+		expect(result.success).toBe(false);
+		if (result.success) return;
+
+		expect(result.issues).toEqual([
+			{
+				code: 'node_id_too_long',
+				path: ['nodes', 1, 'id'],
+				message: 'Node "Set" has an ID longer than 64 characters',
+			},
+		]);
+	});
+
+	test.each([
+		['ASCII', 'n'],
+		['astral', '😀'],
+	])('accepts a node id of exactly NODE_ID_MAX_LENGTH %s characters', (_, character) => {
+		const result = safeParseWorkflowStructure({
+			...validWorkflow,
+			nodes: [
+				validWorkflow.nodes[0],
+				{ ...validWorkflow.nodes[1], id: character.repeat(NODE_ID_MAX_LENGTH) },
+			],
+		});
+
+		expect(result.success).toBe(true);
 	});
 
 	test('accepts duplicate-free ids mixed with nodes that have no id', () => {
