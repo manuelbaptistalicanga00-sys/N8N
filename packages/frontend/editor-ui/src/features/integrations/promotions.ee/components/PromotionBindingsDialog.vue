@@ -15,7 +15,6 @@ import { usePromotionBindings } from '../composables/usePromotionBindings';
 import type {
 	AppliedResult,
 	BlockedApplyResult,
-	ContinueTarget,
 	CreatedPromotionBinding,
 	CreatePromotionBinding,
 	MissingPromotionBinding,
@@ -26,7 +25,6 @@ const props = defineProps<{
 	open: boolean;
 	blockedResult: BlockedApplyResult;
 	createBinding: CreatePromotionBinding;
-	continueWith: ContinueTarget;
 }>();
 
 const emit = defineEmits<{
@@ -61,7 +59,7 @@ const {
 watch(
 	() => props.open,
 	(open) => {
-		if (open) bindings.start(props.blockedResult, props.continueWith);
+		if (open) bindings.start(props.blockedResult);
 		else bindings.end();
 	},
 	{ immediate: true },
@@ -195,7 +193,7 @@ async function create(key: string, event: MouseEvent) {
 }
 
 async function continueApply() {
-	const result = await bindings.continueApply();
+	const result = await bindings.continueInstanceApply();
 	if (result?.status === 'applied') {
 		emit('applied', result);
 		emit('update:open', false);

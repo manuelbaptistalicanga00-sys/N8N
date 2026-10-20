@@ -5,7 +5,6 @@ import type { RouteLocationNormalized, RouteRecordRaw } from 'vue-router';
 
 import { VIEWS } from '@/app/constants';
 import { usePromotionsEnabled } from '@/features/shared/promotions/usePromotionsEnabled';
-import { PROMOTIONS_MODALS } from './modals';
 import {
 	PROMOTION_PREVIEW_VIEWS,
 	PROMOTIONS_SETTINGS_SCOPES,
@@ -69,5 +68,4 @@ export const PromotionsModule = defineFrontendModule({
 		previewRoute('promote'),
 		previewRoute('apply'),
 	],
-	modals: PROMOTIONS_MODALS,
 });

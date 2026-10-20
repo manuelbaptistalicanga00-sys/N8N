@@ -4,6 +4,7 @@ import type { PromotionPreview } from '@n8n/api-types';
 import { waitAllPromises } from '@/__tests__/utils';
 import { usePromotionChangeCount } from './usePromotionChangeCount';
 import * as api from '../promotions.api';
+import { resource } from '../__tests__/preview.fixtures';
 
 vi.mock('@n8n/stores/useRootStore', () => ({
 	useRootStore: () => ({ restApiContext: {} }),
@@ -19,7 +20,13 @@ type Pending = {
 const preview = (count: number): PromotionPreview => ({
 	commitSha: 'a'.repeat(40),
 	source: { environmentId: 'config-1', branchName: 'main' },
-	resources: [],
+	resources: Array.from({ length: count }, (_, index) =>
+		resource({
+			key: `workflow:workflow-${index}`,
+			name: `Workflow ${index}`,
+			change: 'added',
+		}),
+	),
 	dependencies: [],
 	changes: Array.from({ length: count }, (_, index) => ({
 		id: `workflow-${index}`,
@@ -49,7 +56,7 @@ describe('usePromotionChangeCount', () => {
 
 	it('should keep the newest result when an older request answers last', async () => {
 		const projectId = ref<string | undefined>('project-a');
-		const { workflowCount, failed } = usePromotionChangeCount(projectId, 'apply', ref(true));
+		const { changeCount, failed } = usePromotionChangeCount(projectId, 'apply', ref(true));
 
 		projectId.value = 'project-b';
 		await nextTick();
@@ -59,13 +66,13 @@ describe('usePromotionChangeCount', () => {
 
 		pending[2].resolve(preview(2));
 		await waitAllPromises();
-		expect(workflowCount.value).toBe(2);
+		expect(changeCount.value).toBe(2);
 
 		// The first request was for the same project, so a project id check alone would accept it.
 		pending[0].resolve(preview(5));
 		pending[1].reject(new Error('offline'));
 		await waitAllPromises();
-		expect(workflowCount.value).toBe(2);
+		expect(changeCount.value).toBe(2);
 		expect(failed.value).toBe(false);
 	});
 });
