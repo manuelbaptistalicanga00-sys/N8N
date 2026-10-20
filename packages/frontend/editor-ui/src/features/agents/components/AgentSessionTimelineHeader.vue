@@ -5,16 +5,16 @@ import {
 	N8nDropdownMenu,
 	N8nIcon,
 	N8nIconButton,
-	N8nToggle,
+	N8nText,
 	N8nTooltip,
 	TOOLTIP_DELAY_MS,
 	type DropdownMenuItemProps,
-	type IconName,
 	type IconOrEmoji,
 	type PathItem,
 } from '@n8n/design-system';
 
 import { useI18n } from '@n8n/i18n';
+import type { SessionTimelineMetadata } from '@/features/agents/types';
 import ProjectIcon from '@/features/collaboration/projects/components/ProjectIcon.vue';
 
 interface SessionDropdownData {
@@ -22,36 +22,33 @@ interface SessionDropdownData {
 	active: boolean;
 }
 
-const props = withDefaults(
-	defineProps<{
-		breadcrumbItems: PathItem[];
-		projectIcon: IconOrEmoji;
-		sessionTitle: string;
-		sessionOptions: Array<DropdownMenuItemProps<string, SessionDropdownData>>;
-		showMetrics: boolean;
-		triggerSource: string | null;
-		triggerIcon: IconName;
-		triggerLabel: string;
-		totalTokens: number;
-		totalCost: number;
-		durationLabel: string;
-		showLangsmithExport: boolean;
-		langsmithExportLoading: boolean;
-		isPreviewOpen?: boolean;
-		showPreview?: boolean;
-	}>(),
-	{ isPreviewOpen: false, showPreview: false },
-);
+const props = defineProps<{
+	breadcrumbItems: PathItem[];
+	projectIcon: IconOrEmoji;
+	sessionTitle: string;
+	sessionOptions: Array<DropdownMenuItemProps<string, SessionDropdownData>>;
+	showLangsmithExport: boolean;
+	langsmithExportLoading: boolean;
+	metadata?: SessionTimelineMetadata;
+}>();
 
 const emit = defineEmits<{
 	'breadcrumb-select': [item: PathItem];
 	'session-select': [sessionId: string];
 	'langsmith-export': [];
-	'toggle-preview': [];
-	close: [];
+	edit: [];
 }>();
 
 const i18n = useI18n();
+
+const tokenFormatter = new Intl.NumberFormat('en-US', {
+	notation: 'compact',
+	maximumFractionDigits: 1,
+});
+
+const costFormatter = new Intl.NumberFormat('en-US', {
+	maximumFractionDigits: 4,
+});
 </script>
 
 <template>
@@ -99,9 +96,9 @@ const i18n = useI18n();
 				</template>
 			</N8nBreadcrumbs>
 		</div>
-		<div v-if="props.showMetrics || props.showPreview" :class="$style.topBarRight">
+		<div :class="$style.topBarRight">
 			<N8nTooltip
-				v-if="props.showMetrics && props.showLangsmithExport"
+				v-if="props.showLangsmithExport"
 				:content="i18n.baseText('agentSessions.langsmithExport.button')"
 				placement="bottom"
 				:show-after="TOOLTIP_DELAY_MS"
@@ -117,47 +114,45 @@ const i18n = useI18n();
 					@click="emit('langsmith-export')"
 				/>
 			</N8nTooltip>
-			<span v-if="props.showMetrics && props.triggerSource" :class="$style.metricItem">
-				<N8nIcon :icon="props.triggerIcon" :size="12" />
-				<span>{{ props.triggerLabel }}</span>
-			</span>
-			<span v-if="props.showMetrics" :class="$style.sep">·</span>
-			<span v-if="props.showMetrics" :class="$style.metricItem">
-				<N8nIcon icon="circle-dollar-sign" :size="12" />
-				<span>{{ props.totalTokens.toLocaleString() }}t (${{ props.totalCost.toFixed(4) }})</span>
-			</span>
-			<span v-if="props.showMetrics" :class="$style.sep">·</span>
-			<span v-if="props.showMetrics" :class="$style.metricItem">
-				<N8nIcon icon="clock" :size="12" />
-				<span>{{ props.durationLabel }}</span>
-			</span>
-			<N8nToggle
-				v-if="props.showPreview"
-				:model-value="props.isPreviewOpen"
-				variant="ghost"
+			<ul
+				v-if="metadata"
+				:class="$style.descriptionList"
+				data-testid="agent-session-timeline-metadata"
+			>
+				<li v-if="metadata.trigger.label">
+					<N8nIcon color="text-light" :icon="metadata.trigger.icon" />
+					<N8nText step="xs" bold>{{ metadata.trigger.label }}</N8nText>
+				</li>
+				<li>
+					<N8nIcon color="text-light" icon="hash" />
+					<N8nText step="xs" bold>
+						{{ tokenFormatter.format(metadata.totalTokens).toUpperCase() }}
+						<span :class="$style.innerLabel"
+							>(${{ costFormatter.format(metadata.totalCost) }})</span
+						>
+					</N8nText>
+				</li>
+				<li>
+					<N8nIcon color="text-light" icon="clock" />
+					<N8nText step="xs" bold>{{ metadata.durationLabel }}</N8nText>
+				</li>
+			</ul>
+
+			<N8nButton
+				variant="outline"
+				icon="pencil"
 				size="medium"
-				icon="play"
-				:label="i18n.baseText('agents.builder.preview.button')"
-				data-testid="agent-session-timeline-preview-btn"
-				@click="emit('toggle-preview')"
-			/>
-			<N8nTooltip :content="i18n.baseText('generic.close')">
-				<N8nButton
-					variant="ghost"
-					icon-only
-					icon="x"
-					size="medium"
-					:aria-label="i18n.baseText('generic.close')"
-					data-testid="agent-session-timeline-close"
-					data-test-id="agent-session-timeline-close"
-					@click="emit('close')"
-				/>
-			</N8nTooltip>
+				data-testid="agent-session-timeline-edit"
+				@click="emit('edit')"
+				>{{ i18n.baseText('agentNode.ndv.referenced.editInBuilder') }}</N8nButton
+			>
 		</div>
 	</div>
 </template>
 
 <style module lang="scss">
+@use '@n8n/design-system/css/mixins/utils';
+
 .topBar {
 	display: flex;
 	align-items: center;
@@ -194,23 +189,12 @@ const i18n = useI18n();
 .topBarRight {
 	display: flex;
 	align-items: center;
-	gap: var(--spacing--3xs);
+	gap: var(--spacing--xs);
 	font-size: var(--font-size--xs);
 	font-weight: var(--font-weight--medium);
 	user-select: none;
 	color: var(--text-color--subtler);
 	margin-left: auto;
-}
-
-.sep {
-	color: var(--text-color--subtler);
-}
-
-.metricItem {
-	display: inline-flex;
-	align-items: center;
-	gap: var(--spacing--4xs);
-	white-space: nowrap;
 }
 
 .crumbSeparator {
@@ -258,5 +242,39 @@ const i18n = useI18n();
 	text-align: right;
 	white-space: nowrap;
 	margin-left: auto;
+}
+.descriptionList {
+	display: flex;
+	flex-direction: row;
+	gap: var(--spacing--sm);
+
+	.innerLabel {
+		color: var(--text-color--subtler);
+	}
+
+	li {
+		min-width: 0;
+		display: flex;
+		justify-content: flex-start;
+		align-items: center;
+		gap: var(--spacing--2xs);
+		height: var(--height--sm);
+		font-size: var(--font-size--sm);
+		padding-inline: var(--spacing--xs);
+		margin-inline: calc(var(--spacing--xs) * -1);
+		background-color: transparent;
+		border-radius: var(--radius);
+		user-select: none;
+
+		:global(.n8n-icon) {
+			flex-shrink: 0;
+			height: auto;
+		}
+
+		:global(.n8n-text) {
+			flex: 1;
+			@include utils.utils-ellipsis;
+		}
+	}
 }
 </style>
