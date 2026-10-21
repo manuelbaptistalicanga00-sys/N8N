@@ -1003,6 +1003,7 @@ export {
 	type JwksResponse,
 } from './schemas/jwks.schema';
 
+export * from './self-healing-configurations';
 export type {
 	ScimUser,
 	ScimUserCreate,
