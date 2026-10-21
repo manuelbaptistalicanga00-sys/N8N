@@ -1005,7 +1005,6 @@ export {
 
 export type {
 	ScimUser,
-	ScimUserCreate,
 	ScimPatchOp,
 	ScimPatchRequest,
 	ScimListResponse,
@@ -1013,11 +1012,9 @@ export type {
 	ScimMeta,
 	ScimUserName,
 	ScimEmail,
-	ScimRole,
 } from './schemas/scim.schema';
 export {
 	scimUserSchema,
-	scimUserCreateSchema,
 	scimPatchRequestSchema,
 	scimListResponseSchema,
 	scimErrorSchema,
