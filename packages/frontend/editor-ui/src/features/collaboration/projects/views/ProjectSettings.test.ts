@@ -11,7 +11,7 @@ import {
 } from '@/__tests__/utils';
 import ProjectSettings from './ProjectSettings.vue';
 import { useProjectsStore } from '../projects.store';
-import { VIEWS } from '@/app/constants';
+import { MODAL_CANCEL, MODAL_CLOSE, MODAL_CONFIRM, VIEWS } from '@/app/constants';
 import type { Project } from '../projects.types';
 import { ProjectTypes } from '../projects.types';
 import { createProjectListItem } from '../__tests__/utils';
@@ -26,6 +26,8 @@ const mockTrack = vi.fn();
 const mockShowMessage = vi.fn();
 const mockShowError = vi.fn();
 const mockRouterPush = vi.fn();
+type RouteLeaveGuard = (to: unknown, from: unknown, next: (arg?: unknown) => void) => unknown;
+let routeLeaveGuard: RouteLeaveGuard | undefined;
 const { emitters, addEmitter } = useEmitters<
 	'projectMembersTable' | 'n8nUserSelect' | 'n8nIconPicker'
 >();
@@ -40,6 +42,16 @@ vi.mock('@n8n/composables/useToast', () => ({
 	useToast: () => ({
 		showMessage: mockShowMessage,
 		showError: mockShowError,
+	}),
+}));
+
+const mockConfirm = vi.fn();
+vi.mock('@/app/composables/useMessage', () => ({
+	useMessage: () => ({
+		confirm: mockConfirm,
+		alert: vi.fn(),
+		prompt: vi.fn(),
+		message: vi.fn(),
 	}),
 }));
 
@@ -60,6 +72,9 @@ vi.mock('vue-router', async () => {
 				params: {},
 				query: {},
 			}),
+		onBeforeRouteLeave: (guard: RouteLeaveGuard) => {
+			routeLeaveGuard = guard;
+		},
 	};
 });
 
@@ -162,6 +177,9 @@ describe('ProjectSettings', () => {
 		mockShowMessage.mockClear();
 		mockShowError.mockClear();
 		mockRouterPush.mockClear();
+		routeLeaveGuard = undefined;
+		mockConfirm.mockReset();
+		mockConfirm.mockResolvedValue(MODAL_CLOSE);
 
 		mockShowMessage.mockReturnValue({ id: 'test', close: vi.fn() });
 		createTestingPinia();
@@ -791,6 +809,102 @@ describe('ProjectSettings', () => {
 			await nextTick();
 			expect(updateSpy).toHaveBeenCalled();
 			expect(mockShowMessage).toHaveBeenCalledWith(expect.objectContaining({ type: 'success' }));
+		});
+	});
+
+	describe('Unsaved changes', () => {
+		// KNO-41: the icon saves on change, but name and description need "Save".
+		// Leaving the page must not silently drop the typed name and description.
+		const editNameDescriptionAndIcon = async (getByTestId: (id: string) => HTMLElement) => {
+			projectsStore.updateProject.mockResolvedValue(undefined);
+			await userEvent.type(getInput(getByTestId('project-settings-name-input')), ' Renamed');
+			await userEvent.type(
+				getTextarea(getByTestId('project-settings-description-input')),
+				'Typed description',
+			);
+			emitters.n8nIconPicker.emit('update:model-value', { type: 'icon', value: 'zap' });
+			await nextTick();
+
+			// The icon is persisted on its own, the name and description are still pending
+			expect(projectsStore.updateProject).toHaveBeenCalledTimes(1);
+			expect(projectsStore.updateProject).toHaveBeenCalledWith('123', {
+				icon: { type: 'icon', value: 'zap' },
+			});
+			expect(getByTestId('project-settings-save-button')).toBeEnabled();
+		};
+
+		it('warns before in-app navigation when name and description are not saved', async () => {
+			const { getByTestId } = renderComponent();
+			await nextTick();
+			await editNameDescriptionAndIcon(getByTestId);
+
+			expect(routeLeaveGuard).toBeTypeOf('function');
+
+			// The user dismisses the dialog, so the navigation must be blocked
+			mockConfirm.mockResolvedValue(MODAL_CLOSE);
+			const next = vi.fn();
+			await routeLeaveGuard?.({ name: VIEWS.HOMEPAGE }, { name: VIEWS.PROJECT_SETTINGS }, next);
+
+			expect(mockConfirm).toHaveBeenCalledTimes(1);
+			expect(next).toHaveBeenCalledTimes(1);
+			expect(next).toHaveBeenCalledWith(false);
+		});
+
+		it('leaves without saving when the user discards the changes', async () => {
+			const { getByTestId } = renderComponent();
+			await nextTick();
+			await editNameDescriptionAndIcon(getByTestId);
+
+			mockConfirm.mockResolvedValue(MODAL_CANCEL);
+			const next = vi.fn();
+			await routeLeaveGuard?.({ name: VIEWS.HOMEPAGE }, { name: VIEWS.PROJECT_SETTINGS }, next);
+
+			expect(next).toHaveBeenCalledTimes(1);
+			expect(next).toHaveBeenCalledWith();
+			expect(projectsStore.updateProject).toHaveBeenCalledTimes(1);
+		});
+
+		it('saves and then leaves when the user confirms', async () => {
+			const { getByTestId } = renderComponent();
+			await nextTick();
+			await editNameDescriptionAndIcon(getByTestId);
+
+			mockConfirm.mockResolvedValue(MODAL_CONFIRM);
+			const next = vi.fn();
+			await routeLeaveGuard?.({ name: VIEWS.HOMEPAGE }, { name: VIEWS.PROJECT_SETTINGS }, next);
+
+			expect(projectsStore.updateProject).toHaveBeenCalledTimes(2);
+			expect(projectsStore.updateProject).toHaveBeenLastCalledWith(
+				'123',
+				expect.objectContaining({
+					name: 'Test Project Renamed',
+					description: 'Typed description',
+				}),
+			);
+			expect(next).toHaveBeenCalledTimes(1);
+			expect(next).toHaveBeenCalledWith(true);
+		});
+
+		it('does not ask when there are no unsaved changes', async () => {
+			renderComponent();
+			await nextTick();
+
+			const next = vi.fn();
+			await routeLeaveGuard?.({ name: VIEWS.HOMEPAGE }, { name: VIEWS.PROJECT_SETTINGS }, next);
+
+			expect(mockConfirm).not.toHaveBeenCalled();
+			expect(next).toHaveBeenCalledWith();
+		});
+
+		it('warns before the browser tab closes when name and description are not saved', async () => {
+			const { getByTestId } = renderComponent();
+			await nextTick();
+			await editNameDescriptionAndIcon(getByTestId);
+
+			const event = new Event('beforeunload', { cancelable: true });
+			window.dispatchEvent(event);
+
+			expect(event.defaultPrevented).toBe(true);
 		});
 	});
 
