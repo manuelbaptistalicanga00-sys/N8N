@@ -45,6 +45,7 @@ vi.mock('../components/AgentEvalTryRow.vue', () => ({
 			focused: { type: Boolean },
 			fixSuggestion: {},
 			applyingSuggestion: { type: Boolean },
+			notGraded: { type: Boolean },
 		},
 		emits: [
 			'save-check',
@@ -66,6 +67,7 @@ vi.mock('../components/AgentEvalTryRow.vue', () => ({
 			:data-focused="focused"
 			:data-fix-suggestion="fixSuggestion"
 			:data-applying-suggestion="applyingSuggestion"
+			:data-not-graded="notGraded"
 		>
 			{{ input }}
 			<button @click="$emit('actually-fine')">actually fine</button>
@@ -351,6 +353,24 @@ describe('AgentEvalChecksPanel', () => {
 
 		expect(getByTestId('agent-eval-check-judged-1')).toHaveAttribute('data-status', 'work');
 		expect(getByTestId('agent-eval-checks-filter-needs-work')).toHaveTextContent('1');
+	});
+
+	it('marks a successful case the judge did not grade as not graded, and only that row', () => {
+		const judgeError = {
+			...result('judge-error-1', 'success'),
+			verdict: { status: 'error' as const, outcome: null, reasoning: 'No clear verdict.' },
+		};
+		const gradedFail = {
+			...result('judged-1', 'success'),
+			verdict: { status: 'completed' as const, outcome: 'fail' as const, reasoning: 'Off-task.' },
+		};
+		const { getByTestId } = render({ results: [judgeError, gradedFail] });
+
+		expect(getByTestId('agent-eval-check-judge-error-1')).toHaveAttribute(
+			'data-not-graded',
+			'true',
+		);
+		expect(getByTestId('agent-eval-check-judged-1')).toHaveAttribute('data-not-graded', 'false');
 	});
 
 	it('renders a successful case with no verdict (ungraded) as "pass", same as before judging shipped', () => {

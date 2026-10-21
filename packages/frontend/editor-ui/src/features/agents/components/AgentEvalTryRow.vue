@@ -64,6 +64,8 @@ const props = defineProps<{
 	fixSuggestion?: string | null;
 	/** True from "Apply suggestion" until the rewrite and rerun settle. */
 	applyingSuggestion?: boolean;
+	/** The case ran but the judge did not grade it. The row offers a rerun, not a correction. */
+	notGraded?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -94,7 +96,10 @@ const root = ref<HTMLElement | null>(null);
 // A case the judge marked as needing work or unable to finish gets a chance to
 // say what should have happened instead — a passed or not-yet-run case has
 // nothing to correct.
-const needsCorrection = computed(() => props.status === 'work' || props.status === 'fail');
+// A judge error says nothing about the agent, so there is nothing to correct.
+const needsCorrection = computed(
+	() => !props.notGraded && (props.status === 'work' || props.status === 'fail'),
+);
 
 // "Keep as is" hides the card only until a different suggestion arrives (a rerun failed
 // again), so a new proposal is never swallowed by an old dismissal.
@@ -130,7 +135,13 @@ const STATUS_TEXT: Record<AgentAvatarKind, StatusText> = {
 	fail: { labelKey: 'agents.builder.agentEvals.checks.status.needsWork', color: 'danger' },
 };
 
-const statusText = computed(() => i18n.baseText(STATUS_TEXT[props.status].labelKey));
+const statusText = computed(() =>
+	i18n.baseText(
+		props.notGraded
+			? 'agents.builder.agentEvals.checks.status.notGraded'
+			: STATUS_TEXT[props.status].labelKey,
+	),
+);
 const statusColor = computed(() => STATUS_TEXT[props.status].color);
 const statusIsWarning = computed(() => STATUS_TEXT[props.status].warning === true);
 

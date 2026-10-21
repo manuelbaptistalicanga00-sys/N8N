@@ -232,6 +232,39 @@ describe('AgentEvalTryRow', () => {
 		});
 	});
 
+	describe('notGraded (the judge did not grade the case)', () => {
+		const renderNotGraded = () =>
+			renderComponent({
+				props: {
+					status: 'work',
+					output: 'Order #123 ships tomorrow.',
+					errorMessage: 'The checker did not give a clear pass or fail.',
+					fixSuggestion: 'Always include the ticket number.',
+					notGraded: true,
+					testId: 'row',
+				},
+			});
+
+		it('says the check could not be graded, not that it needs work', () => {
+			const { getByText, queryByText } = renderNotGraded();
+
+			expect(getByText('Couldn’t grade. Run it again.')).toBeInTheDocument();
+			expect(queryByText('Needs work')).not.toBeInTheDocument();
+		});
+
+		it('offers "Run check" instead of the correction controls and fix suggestion', async () => {
+			const user = userEvent.setup();
+			const { getByTestId, queryByTestId, getByText } = renderNotGraded();
+			await user.click(getByTestId('row-toggle'));
+
+			expect(getByTestId('row-run-check')).toBeInTheDocument();
+			expect(queryByTestId('row-suggestion')).not.toBeInTheDocument();
+			expect(queryByTestId('row-actually-fine')).not.toBeInTheDocument();
+			expect(queryByTestId('row-suggestion-card')).not.toBeInTheDocument();
+			expect(getByText(/did not give a clear pass or fail/)).toBeInTheDocument();
+		});
+	});
+
 	describe('"Run check"', () => {
 		const renderPassing = (overrides: Record<string, unknown> = {}) =>
 			renderComponent({

@@ -21,6 +21,7 @@ import {
 	readAgentAnswer,
 	readCaseRequest,
 	readCaseWhatToCheck,
+	isJudgeError,
 	readErrorMessage,
 	readVerdictReasoning,
 	readVerdictSuggestion,
@@ -88,6 +89,8 @@ type CheckRow = {
 	whatToCheck: string | null;
 	/** The judge's proposed instruction for a failed check, if it made one. */
 	fixSuggestion: string | null;
+	/** The case ran but the judge did not grade it. */
+	notGraded: boolean;
 };
 
 const rows = computed<CheckRow[]>(() =>
@@ -106,6 +109,7 @@ const rows = computed<CheckRow[]>(() =>
 			toolCalls: toDisplayToolCalls(result.toolCalls),
 			whatToCheck: readCaseWhatToCheck(result.input),
 			fixSuggestion: readVerdictSuggestion(result.verdict),
+			notGraded: isJudgeError(result.status, result.verdict),
 		};
 	}),
 );
@@ -517,6 +521,7 @@ onBeforeUnmount(store.stopPollingRun);
 				:project-id="projectId"
 				:what-to-check="row.whatToCheck"
 				:fix-suggestion="row.fixSuggestion"
+				:not-graded="row.notGraded"
 				:applying-suggestion="applyingSuggestionIds.includes(row.id)"
 				:disabled="disabled || showingPreviousRun || isApplyingSuggestions"
 				:running-check="row.status === 'waiting'"
