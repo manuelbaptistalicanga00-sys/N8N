@@ -1,3 +1,4 @@
+import { AssistantSkillProviderProxy } from '@n8n/backend-services';
 // Manual mocks — must be declared before any imports that touch the mocked modules.
 vi.mock('@n8n/agents', async (importOriginal) => ({
 	...(await importOriginal<typeof import('@n8n/agents')>()),
@@ -936,7 +937,7 @@ describe('InstanceAiService — runtime workspace setup', () => {
 			skillsService: InstanceAiSkillsService;
 		};
 		service.areMcpConnectionsAvailable = vi.fn(() => true);
-		service.skillsService = new InstanceAiSkillsService();
+		service.skillsService = new InstanceAiSkillsService(new AssistantSkillProviderProxy());
 		service.settingsService = {
 			getAdminSettings: vi.fn(() => ({ localGatewayDisabled: false, sandboxEnabled: true })),
 			getSandboxStatus: vi.fn(() => ({
@@ -1305,7 +1306,7 @@ describe('InstanceAiService — runtime workspace setup', () => {
 			skillsService: InstanceAiSkillsService;
 		};
 		service.areMcpConnectionsAvailable = vi.fn(() => false);
-		service.skillsService = new InstanceAiSkillsService();
+		service.skillsService = new InstanceAiSkillsService(new AssistantSkillProviderProxy());
 		service.settingsService = {
 			getAdminSettings: vi.fn(() => ({ localGatewayDisabled: false, sandboxEnabled: true })),
 			getSandboxStatus: vi.fn(() => ({

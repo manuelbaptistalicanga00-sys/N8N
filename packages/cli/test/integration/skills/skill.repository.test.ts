@@ -1,6 +1,8 @@
+import { ASSISTANT_SKILLS_FLAG } from '@n8n/api-types';
 import {
 	createTeamProject,
 	getPersonalProject,
+	mockInstance,
 	testDb,
 	testModules,
 } from '@n8n/backend-test-utils';
@@ -8,13 +10,19 @@ import { TransactionRunner, type Project, type User } from '@n8n/db';
 import { Container } from '@n8n/di';
 import { randomUUID } from 'node:crypto';
 
+import type { AgentScope } from '@/modules/agents/entities/agent.entity';
+
 import { AgentHistoryRepository } from '@/modules/agents/repositories/agent-history.repository';
 import { AgentSkillRepository } from '@/modules/agents/repositories/agent-skill.repository';
 import { AgentRepository } from '@/modules/agents/repositories/agent.repository';
+import { registerSkillAgentsProvider } from '@/modules/agents/register-skill-agents-provider';
+import { setSkillsHubFlag } from '@/modules/skills/__tests__/test-utils/skills-hub-flag';
+import { HubAssistantSkillProvider } from '@/modules/skills/hub-assistant-skill-provider.service';
 import { skillContentHash, type SkillContent } from '@/modules/skills/skill-content-hash';
 import { SkillRepository, type SkillVisibility } from '@/modules/skills/skill.repository';
+import { PostHogClient } from '@/posthog';
 
-import { createUser } from '../shared/db/users';
+import { createOwner, createUser } from '../shared/db/users';
 
 /** More ids than SQLite binds in one query (32,766). */
 const manyUnknownIds = () => Array.from({ length: 33_000 }, (_, i) => `skill_unknown${i}`);
@@ -29,7 +37,10 @@ const content = (overrides: Partial<SkillContent> = {}): SkillContent => ({
 });
 
 describe('SkillRepository', () => {
+	const postHog = mockInstance(PostHogClient);
 	let skills: SkillRepository;
+	let assistantSkills: HubAssistantSkillProvider;
+	let owner: User;
 	let agentSkills: AgentSkillRepository;
 	let agents: AgentRepository;
 	let histories: AgentHistoryRepository;
@@ -46,9 +57,19 @@ describe('SkillRepository', () => {
 		agents = Container.get(AgentRepository);
 		histories = Container.get(AgentHistoryRepository);
 		txRunner = Container.get(TransactionRunner);
+		registerSkillAgentsProvider();
+		setSkillsHubFlag(true);
+		assistantSkills = Container.get(HubAssistantSkillProvider);
+		owner = await createOwner();
 		user = await createUser();
 		project = await createTeamProject('Team');
 		otherProject = await createTeamProject('Other team');
+	});
+
+	beforeEach(() => {
+		postHog.getFeatureFlagForInstance.mockImplementation(
+			async (flag) => flag === ASSISTANT_SKILLS_FLAG,
+		);
 	});
 
 	afterEach(async () => {
@@ -59,6 +80,81 @@ describe('SkillRepository', () => {
 
 	afterAll(async () => {
 		await testDb.terminate();
+	});
+
+	it('lists only enabled instance and session-project skills, with the latest metadata', async () => {
+		const instance = await createSkill();
+		const scoped = await createSkill({ projectId: project.id });
+		const other = await createSkill({ projectId: otherProject.id });
+		await createSkill();
+		for (const id of [instance, scoped, other])
+			await skills.update(id, { availableToAssistant: true });
+		const versionId = await skills.insertSavedVersion(
+			scoped,
+			2,
+			content({ name: 'Updated' }),
+			null,
+		);
+		expect((await assistantSkills.listSkills({ user: owner })).map(({ id }) => id)).toEqual([
+			instance,
+		]);
+		const result = await assistantSkills.listSkills({ user: owner, projectId: project.id });
+		expect(result.map(({ id }) => id).sort()).toEqual([instance, scoped].sort());
+		expect(result.find(({ id }) => id === scoped)).toEqual({
+			id: scoped,
+			projectId: project.id,
+			name: 'Updated',
+			description: 'Write in our voice',
+			version: 2,
+			versionId,
+		});
+	});
+
+	it.each(['project', 'instance'] as const)(
+		'excludes skills scoped to an agent with %s scope even when their flag is set',
+		async (scope) => {
+			const agent = await createAgent('Support', {
+				projectId: scope === 'project' ? project.id : null,
+				scope,
+			});
+			const id = await createSkill({ agentId: agent.id });
+			await skills.update(id, { availableToAssistant: true });
+
+			expect(await skills.findAssistantSkillSummaries(null)).toEqual([]);
+			expect(await skills.findAssistantSkillSummaries(project.id)).toEqual([]);
+			expect(
+				await assistantSkills.readSkill({ user: owner, projectId: project.id }, id),
+			).toBeNull();
+		},
+	);
+
+	it('refuses an availability update when the checked scope changed', async () => {
+		const id = await createSkill({ projectId: project.id });
+		await expect(
+			txRunner.run(
+				{},
+				async (ctx) =>
+					await skills.setAssistantAvailability(
+						id,
+						true,
+						{ projectId: otherProject.id, agentId: null },
+						ctx,
+					),
+			),
+		).rejects.toThrow('The skill scope changed');
+		expect((await skills.findByIds([id]))[0].availableToAssistant).toBe(false);
+	});
+
+	it('clears Assistant availability only when a skill moves to an agent', async () => {
+		const id = await createSkill();
+		const agent = await createAgent('Private scope');
+		await skills.update(id, { availableToAssistant: true });
+		await skills.updateTarget(id, { projectId: project.id, agentId: null });
+		expect((await skills.findByIds([id]))[0].availableToAssistant).toBe(true);
+		await skills.updateTarget(id, { projectId: null, agentId: agent.id });
+		expect((await skills.findByIds([id]))[0].availableToAssistant).toBe(false);
+		await skills.updateTarget(id, { projectId: null, agentId: null });
+		expect((await skills.findByIds([id]))[0].availableToAssistant).toBe(false);
 	});
 
 	let counter = 0;
@@ -79,13 +175,17 @@ describe('SkillRepository', () => {
 		return id;
 	}
 
-	async function createAgent(name: string, options: { inSync?: boolean; projectId?: string } = {}) {
+	async function createAgent(
+		name: string,
+		options: { inSync?: boolean; projectId?: string | null; scope?: AgentScope } = {},
+	) {
 		const versionId = randomUUID();
 		const agent = await agents.save(
 			agents.create({
 				id: randomUUID(),
 				name,
-				projectId: options.projectId ?? project.id,
+				projectId: options.projectId === undefined ? project.id : options.projectId,
+				scope: options.scope ?? 'project',
 				integrations: [],
 				tools: {},
 				versionId,

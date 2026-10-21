@@ -25,6 +25,7 @@ import { useDocumentTitle } from '@/app/composables/useDocumentTitle';
 import { useMessage } from '@/app/composables/useMessage';
 import { DEBOUNCE_TIME, MODAL_CONFIRM, VIEWS } from '@/app/constants';
 import { useUIStore } from '@/app/stores/ui.store';
+import { useAssistantSkillsExperiment } from '@/experiments/assistantSkills/useAssistantSkillsExperiment';
 import { useProjectsStore } from '@/features/collaboration/projects/projects.store';
 import { AGENT_SKILL_MODAL_KEY } from '@/features/agents/constants';
 import { isSkillNameTakenError } from '@/features/agents/utils/agentSkill';
@@ -55,6 +56,7 @@ const message = useMessage();
 const uiStore = useUIStore();
 const projectsStore = useProjectsStore();
 const skillsStore = useSkillsStore();
+const { isEnabled: assistantSkillsEnabled } = useAssistantSkillsExperiment();
 const telemetry = useTelemetry();
 const { showError, showMessage } = useToast();
 const { scopeDisplay } = useSkillScopeDisplay();
@@ -297,16 +299,20 @@ async function openEditModal(item: Pick<SkillListItem, 'id'>) {
 			skill: detail.skill,
 			skillId: detail.id,
 			readOnly: !detail.canEdit,
+			...(assistantSkillsEnabled.value && detail.scope !== 'agent'
+				? { availableToAssistant: detail.availableToAssistant }
+				: {}),
 			scopeOptions: options,
 			initialScope: currentValue,
 			...scopeLock(detail),
 			existingSkillNames: [],
-			onConfirm: async ({ skill, scope }) =>
+			onConfirm: async ({ skill, scope, availableToAssistant }) =>
 				await onSave(
 					detail.id,
 					skill,
 					detail.skillHash,
 					scope !== currentValue ? scope : undefined,
+					availableToAssistant,
 				),
 		});
 	} catch (error) {
@@ -321,6 +327,7 @@ async function onSave(
 	skill: AgentSkill,
 	baseSkillHash: string,
 	newScope?: string,
+	availableToAssistant?: boolean,
 ): Promise<AgentSkillConfirmFailure | undefined> {
 	let created: boolean;
 	try {
@@ -332,13 +339,13 @@ async function onSave(
 			references: skill.references ?? [],
 			baseSkillHash,
 			...(newScope ? parseScope(newScope) : {}),
+			...(availableToAssistant !== undefined ? { availableToAssistant } : {}),
 		}));
 	} catch (error) {
 		return saveFailed(error);
 	}
-	// A move is a change even when the content stays the same. Only "Nothing to save"
-	// gets a message: a real change shows in the table.
-	if (created || newScope !== undefined) {
+	// Scope and availability changes do not create a content version.
+	if (created || newScope !== undefined || availableToAssistant !== undefined) {
 		await load();
 		confirmIfHidden(id, 'saved');
 	} else {
@@ -459,6 +466,7 @@ onMounted(async () => {
 			:items-length="skillsStore.count"
 			:loading="skillsStore.loading"
 			:show-empty="showEmptyState"
+			:show-assistant-availability="assistantSkillsEnabled"
 			@open="openEditModal"
 			@delete="onDelete"
 			@update:options="onOptionsUpdate"
