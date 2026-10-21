@@ -1,4 +1,5 @@
 import { reactive } from 'vue';
+import { within } from '@testing-library/vue';
 import { createComponentRenderer } from '@/__tests__/render';
 import { createTestingPinia } from '@pinia/testing';
 import { type MockedStore, mockedStore } from '@/__tests__/utils';
@@ -252,6 +253,40 @@ describe('MainSidebar', () => {
 			creditsItem.click();
 
 			expect(openTopUpMock).toHaveBeenCalledWith({ source: 'settings_page' });
+		});
+
+		it('should list the settings links under their section headings', async () => {
+			settingsStore.settings = {
+				...defaultSettings,
+				aiGateway: {
+					enabled: true,
+					budget: 0,
+					cloudUbbEnabled: true,
+				},
+			};
+
+			const { getByText, findByTestId, queryByTestId } = renderComponent();
+
+			getByText('Settings').click();
+			const personalSection = await findByTestId('main-sidebar-settings-section-personal');
+			const billingSection = await findByTestId('main-sidebar-settings-section-billing');
+
+			// Routed links render through the mocked RouterLink, so only the credits link has text.
+			expect(within(personalSection).getByText('Personal')).toBeInTheDocument();
+			expect(within(billingSection).getByText('Billing')).toBeInTheDocument();
+			expect(within(billingSection).getByText('Gateway credits')).toBeInTheDocument();
+			expect(queryByTestId('main-sidebar-settings-section-general')).not.toBeInTheDocument();
+		});
+
+		it('should pin sign out below the scrolling settings list', async () => {
+			const { getByText, findByTestId, getByTestId } = renderComponent();
+
+			getByText('Settings').click();
+			const signOut = await findByTestId('main-sidebar-log-out');
+
+			expect(getByTestId('popover-footer')).toContainElement(signOut);
+			expect(getByTestId('main-sidebar-settings-list')).not.toContainElement(signOut);
+			expect(getByTestId('scroll-area-fade-bottom')).toBeInTheDocument();
 		});
 	});
 });
