@@ -1,5 +1,5 @@
 import type { ModuleInterface } from '@n8n/decorators';
-import { BackendModule } from '@n8n/decorators';
+import { BackendModule, OnShutdown } from '@n8n/decorators';
 import { Logger } from '@n8n/backend-common';
 import { Container } from '@n8n/di';
 
@@ -8,6 +8,7 @@ export class AppsModule implements ModuleInterface {
 	async init() {
 		await import('./apps.controller.js');
 		await import('./apps-list.controller.js');
+		await import('./app-build.controller.js');
 		const { AppBlobStore } = await import('./storage/app-blob-store.js');
 		await Container.get(AppBlobStore).init();
 		const { AppSourceVersionStore, AppBuildResultStore } = await import(
@@ -21,9 +22,16 @@ export class AppsModule implements ModuleInterface {
 		Container.get(Logger).warn('The apps module is experimental.');
 	}
 
+	@OnShutdown()
+	async shutdown() {
+		const { AppBuildService } = await import('./app-build.service.js');
+		await Container.get(AppBuildService).shutdown();
+	}
+
 	async systemTasks() {
 		const { AppStorageCleanupTask } = await import('./app-storage-cleanup.task.js');
-		return [AppStorageCleanupTask];
+		const { AppBuildReconciliationTask } = await import('./app-build-reconciliation.task.js');
+		return [AppStorageCleanupTask, AppBuildReconciliationTask];
 	}
 
 	async entities() {
