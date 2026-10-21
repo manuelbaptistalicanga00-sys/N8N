@@ -8,6 +8,7 @@ import { mock } from 'vitest-mock-extended';
 import { ScimSwitchReader } from '@/sso.ee/scim-switch-reader';
 import * as ssoHelpers from '@/sso.ee/sso-helpers';
 
+import type { ScimOptInService } from '../scim-opt-in.service';
 import type { ScimSettingsService } from '../scim-settings.service';
 import { ScimSsoService } from '../scim-sso.service';
 
@@ -15,6 +16,7 @@ describe('ScimSsoService', () => {
 	let eventService: EventService;
 	let scimSettingsService: Mocked<ScimSettingsService>;
 	let moduleRegistry: Mocked<ModuleRegistry>;
+	let scimOptInService: Mocked<ScimOptInService>;
 	let logger: ReturnType<typeof mockLogger>;
 	let scimSwitchReader: ScimSwitchReader;
 	let settingsRepository: Mocked<SettingsRepository>;
@@ -39,6 +41,7 @@ describe('ScimSsoService', () => {
 		eventService = new EventService();
 		scimSettingsService = mock<ScimSettingsService>();
 		moduleRegistry = mock<ModuleRegistry>();
+		scimOptInService = mock<ScimOptInService>();
 		logger = mockLogger();
 		scimSwitchReader = new ScimSwitchReader(mock<LicenseState>(), mock<SettingsRepository>());
 		settingsRepository = mock<SettingsRepository>();
@@ -47,6 +50,7 @@ describe('ScimSsoService', () => {
 			eventService,
 			scimSettingsService,
 			moduleRegistry,
+			scimOptInService,
 			scimSwitchReader,
 			settingsRepository,
 		);
@@ -104,6 +108,43 @@ describe('ScimSsoService', () => {
 
 			expect(await service.isSsoEnabledInTransaction(ctx)).toBe(false);
 			expect(settingsRepository.findByKeyInContext).not.toHaveBeenCalled();
+		});
+	});
+
+	describe('isProvisioningOn', () => {
+		const given = ({ sso = true, enabled = true, optIn = true } = {}) => {
+			ssoOn(sso);
+			scimSettingsService.isEnabled.mockResolvedValue(enabled);
+			scimOptInService.evaluate.mockResolvedValue(
+				optIn ? { available: true, source: 'config' } : { available: false, source: null },
+			);
+		};
+
+		it('is true while single sign-on is on, SCIM is enabled and the opt-in is on', async () => {
+			given();
+
+			expect(await service.isProvisioningOn()).toBe(true);
+		});
+
+		it('is false while single sign-on is off, and does not read the SCIM settings', async () => {
+			given({ sso: false });
+
+			expect(await service.isProvisioningOn()).toBe(false);
+			expect(scimSettingsService.isEnabled).not.toHaveBeenCalled();
+			expect(scimOptInService.evaluate).not.toHaveBeenCalled();
+		});
+
+		it('is false while SCIM is disabled', async () => {
+			given({ enabled: false });
+
+			expect(await service.isProvisioningOn()).toBe(false);
+			expect(scimOptInService.evaluate).not.toHaveBeenCalled();
+		});
+
+		it('is false while the opt-in is off', async () => {
+			given({ optIn: false });
+
+			expect(await service.isProvisioningOn()).toBe(false);
 		});
 	});
 

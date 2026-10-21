@@ -7,6 +7,7 @@ import type {
 } from './chat-hub';
 import type { QuickConnectOption } from './quick-connect';
 import type { InboxSettings } from './inbox';
+import type { ScimOptInSource } from './constants/scim';
 import type { InsightsDateRange } from './schemas/insights.schema';
 import type { WorkflowReviewsPolicy } from './workflow-reviews-policy';
 
@@ -383,6 +384,14 @@ export type FrontendModuleSettings = {
 		scimEnabled: boolean;
 		/** Whether the instance has a SCIM token. */
 		hasToken: boolean;
+		/**
+		 * Whether the SCIM opt-in is on for the instance. While it is off, every
+		 * SCIM route answers 404. The backend evaluates it once for the instance,
+		 * so read it here and do not evaluate the flag for each user.
+		 */
+		available: boolean;
+		/** What turned the opt-in on. `null` while the opt-in is off. */
+		optInSource: ScimOptInSource | null;
 	};
 
 	/**

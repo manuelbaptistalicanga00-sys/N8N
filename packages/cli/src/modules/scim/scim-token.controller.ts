@@ -1,14 +1,33 @@
-import { ScimConfigPatchDto, type ScimConfigResponse } from '@n8n/api-types';
+import {
+	ScimConfigPatchDto,
+	type ScimConfigPatchResponse,
+	type ScimConfigResponse,
+} from '@n8n/api-types';
 import { Logger, ModuleRegistry } from '@n8n/backend-common';
 import type { AuthenticatedRequest } from '@n8n/db';
-import { Body, Delete, Get, GlobalScope, Patch, Post, RestController } from '@n8n/decorators';
-import type { Response } from 'express';
+import {
+	Body,
+	Delete,
+	Get,
+	GlobalScope,
+	Middleware,
+	Patch,
+	Post,
+	RestController,
+} from '@n8n/decorators';
+import type { NextFunction, Request, Response } from 'express';
 
 import { deriveScimConnectionStatus, ScimConnectionService } from './scim-connection.service';
+import { ScimDeprovisioningService } from './scim-deprovisioning.service';
+import { ScimOptInService } from './scim-opt-in.service';
 import { ScimSettingsService } from './scim-settings.service';
 import { ScimSsoService } from './scim-sso.service';
 import { ScimTokenService } from './scim-token.service';
-import { ScimSsoRequiredError, ScimTokenConflictError } from './scim.errors';
+import {
+	ScimInvalidTransferTargetError,
+	ScimSsoRequiredError,
+	ScimTokenConflictError,
+} from './scim.errors';
 import { ScimService } from './scim.service';
 
 /**
@@ -29,25 +48,38 @@ export class ScimTokenController {
 		private readonly scimTokenService: ScimTokenService,
 		private readonly scimSettingsService: ScimSettingsService,
 		private readonly moduleRegistry: ModuleRegistry,
+		private readonly scimOptInService: ScimOptInService,
 		private readonly scimConnectionService: ScimConnectionService,
 		private readonly scimSsoService: ScimSsoService,
 		private readonly scimService: ScimService,
+		private readonly scimDeprovisioningService: ScimDeprovisioningService,
 	) {}
 
 	/**
+	 * Every route answers 404 while the SCIM opt-in is off. The gate runs
+	 * before authentication and the scope check, so a caller without a
+	 * session or without `scim:manage` also gets 404.
+	 */
+	@Middleware({ beforeAuth: true })
+	async requireOptIn(req: Request, res: Response, next: NextFunction) {
+		await this.scimOptInService.gate(req, res, next);
+	}
+
+	/**
 	 * GET /rest/scim/config
-	 * Current provisioning state, connection status and the number of
-	 * provisioned users for the settings screen.
+	 * Current provisioning state, connection status, the number of
+	 * provisioned users and the deprovisioning policy for the settings screen.
 	 */
 	@Get('/config')
 	@GlobalScope('scim:manage')
 	async getConfig(_req: AuthenticatedRequest, res: Response) {
 		try {
-			const [enabled, tokenInfo, lastAuthFailure, counts] = await Promise.all([
+			const [enabled, tokenInfo, lastAuthFailure, counts, deprovisioning] = await Promise.all([
 				this.scimSettingsService.isEnabled(),
 				this.scimTokenService.getTokenInfo(),
 				this.scimSettingsService.getLastAuthFailure(),
 				this.scimService.getProvisioningCounts(),
+				this.scimDeprovisioningService.describePolicy(),
 			]);
 
 			return res.status(200).json({
@@ -61,6 +93,7 @@ export class ScimTokenController {
 					status: deriveScimConnectionStatus(tokenInfo.details, lastAuthFailure),
 					provisionedCount: counts.provisioned,
 					deactivatedCount: counts.deactivated,
+					...deprovisioning,
 				} satisfies ScimConfigResponse,
 			});
 		} catch (error) {
@@ -71,21 +104,32 @@ export class ScimTokenController {
 
 	/**
 	 * PATCH /rest/scim/config
-	 * Enable or disable SCIM provisioning. The stored token is kept when
-	 * provisioning is turned off. Enabling needs SAML or OIDC single sign-on,
-	 * because SCIM users can sign in only through the identity provider.
-	 * Disabling is always allowed.
+	 * Change one or more SCIM settings. A field that the body does not send
+	 * keeps its stored value.
+	 *
+	 * The stored token is kept when provisioning is turned off. Enabling needs
+	 * SAML or OIDC single sign-on, because SCIM users can sign in only through
+	 * the identity provider. Disabling is always allowed.
+	 *
+	 * A transfer project must be a team project or the personal project of an
+	 * active user. The checks run before anything is saved, so a rejected
+	 * body changes nothing. The body is saved in one transaction, so a
+	 * request never saves only a part of it.
 	 */
 	@Patch('/config')
 	@GlobalScope('scim:manage')
 	async updateConfig(_req: AuthenticatedRequest, res: Response, @Body body: ScimConfigPatchDto) {
-		const { enabled } = body;
+		const { enabled, onDelete, dataAction, transferProjectId } = body;
 
 		try {
 			if (enabled) this.assertSsoEnabled();
+			if (transferProjectId) {
+				await this.scimDeprovisioningService.assertValidTransferTarget(transferProjectId);
+			}
 
 			const saved = await this.scimSettingsService.update({
 				enabled,
+				policy: { onDelete, dataAction, transferProjectId },
 				// Single sign-on can turn off after the check above, also on another
 				// main. The SSO-off cascade takes the lock that this check runs
 				// under, and this check reads the saved method. Thus this check
@@ -100,13 +144,16 @@ export class ScimTokenController {
 			// A failure that is stored when SCIM turns on is from before SCIM
 			// turned off, because a disabled SCIM records no failures.
 			if (saved.enabled && !saved.wasEnabled) await this.resetAuthFailure();
-			// `/rest/module-settings` serves a cached snapshot, so refresh it or
-			// clients keep reading the previous value.
-			await this.moduleRegistry.refreshModuleSettings('scim');
+			if (enabled !== undefined) await this.refreshModuleSettings();
 
-			return res.status(200).json({ data: { enabled: saved.enabled } });
+			return res.status(200).json({
+				data: { enabled: saved.enabled, ...saved.policy } satisfies ScimConfigPatchResponse,
+			});
 		} catch (error) {
-			if (error instanceof ScimSsoRequiredError) {
+			if (
+				error instanceof ScimInvalidTransferTargetError ||
+				error instanceof ScimSsoRequiredError
+			) {
 				return res.status(400).json({ message: error.message });
 			}
 
@@ -179,9 +226,10 @@ export class ScimTokenController {
 
 	/**
 	 * `/rest/module-settings` serves a cached snapshot, so refresh it after a
-	 * token change. A failure only delays the new value. It must not fail the
-	 * request: the token change is already saved, and the response of a
-	 * rotation is the only copy of the new token.
+	 * token or switch change, or clients keep reading the previous value. A
+	 * failure only delays the new value. It must not fail the request: the
+	 * change is already saved, and the response of a rotation is the only
+	 * copy of the new token.
 	 */
 	private async refreshModuleSettings() {
 		try {

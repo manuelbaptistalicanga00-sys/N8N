@@ -1,4 +1,9 @@
-import { scimAuthFailureSchema, type ScimAuthFailure } from '@n8n/api-types';
+import {
+	scimAuthFailureSchema,
+	scimDeprovisioningPolicySchema,
+	type ScimAuthFailure,
+	type ScimDeprovisioningPolicy,
+} from '@n8n/api-types';
 import { SettingsRepository, TransactionRunner, type OperationContext } from '@n8n/db';
 import { Service } from '@n8n/di';
 import { jsonParse } from 'n8n-workflow';
@@ -10,6 +15,19 @@ import { SCIM_PROVISIONING_ENABLED_KEY } from '@/sso.ee/scim-switch-reader';
 
 const ENABLED_KEY = SCIM_PROVISIONING_ENABLED_KEY;
 const LAST_AUTH_FAILURE_KEY = 'scim.provisioning.lastAuthFailure';
+const DEPROVISIONING_POLICY_KEY = 'scim.provisioning.deprovisioningPolicy';
+
+/**
+ * The policy while none is stored. `disable` keeps the work of the user and
+ * keeps the behaviour of instances that never saved a policy. Without a
+ * transfer project, a deletion sends the work to the personal project of the
+ * owner.
+ */
+export const DEFAULT_SCIM_DEPROVISIONING_POLICY: Readonly<ScimDeprovisioningPolicy> = {
+	onDelete: 'disable',
+	dataAction: 'transfer',
+	transferProjectId: null,
+};
 
 /** A reset keeps only its time in the failure row. */
 const authFailureResetSchema = z.object({ resetAt: z.string().datetime() });
@@ -30,7 +48,9 @@ function parseAuthFailureRow(value: string) {
 }
 
 export interface ScimSettingsChange {
-	enabled: boolean;
+	enabled?: boolean;
+	/** A field that the change does not set keeps its stored value. */
+	policy?: Partial<ScimDeprovisioningPolicy>;
 	/**
 	 * Runs before an enable is saved, while the switch is locked, in the
 	 * transaction of the change. An error from it cancels the whole change.
@@ -42,6 +62,7 @@ export interface ScimSettingsChangeResult {
 	/** The switch before the change. */
 	wasEnabled: boolean;
 	enabled: boolean;
+	policy: ScimDeprovisioningPolicy;
 }
 
 /**
@@ -127,6 +148,12 @@ export class ScimSettingsService {
 		});
 	}
 
+	/** What SCIM DELETE does. The default applies while no policy is stored. */
+	async getDeprovisioningPolicy(): Promise<ScimDeprovisioningPolicy> {
+		const row = await this.settingsRepository.findByKey(DEPROVISIONING_POLICY_KEY);
+		return parseDeprovisioningPolicy(row?.value);
+	}
+
 	/**
 	 * Turns the switch off and tells if it was on. It reads the saved switch
 	 * under the lock that `update` takes, not the cache. Thus it also turns
@@ -147,25 +174,39 @@ export class ScimSettingsService {
 	}
 
 	/**
-	 * Saves the switch. The switch row stays locked from the read to the
-	 * write, as in `turnOff`, so the two run one after the other. `turnOff`
-	 * sees an enable that committed first, and `assertCanEnable` runs after a
-	 * `turnOff` that started first.
+	 * Saves the switch and the policy in one transaction, so that a request
+	 * never saves only a part of its change. All fields of the policy are in
+	 * one row. That row stays locked from the read to the write, so that two
+	 * changes at the same time cannot lose a field.
+	 *
+	 * A change to the switch also locks the switch row, as `turnOff` does,
+	 * so the two run one after the other. `turnOff` sees an enable that
+	 * committed first, and `assertCanEnable` runs after a `turnOff` that
+	 * started first.
 	 */
 	async update({
 		enabled,
+		policy = {},
 		assertCanEnable,
 	}: ScimSettingsChange): Promise<ScimSettingsChangeResult> {
 		const result = await this.transactionRunner.run({}, async (ctx) => {
+			const savedPolicy = await this.mergeDeprovisioningPolicy(policy, ctx);
+
+			if (enabled === undefined) {
+				const row = await this.settingsRepository.findByKeyInContext(ENABLED_KEY, ctx);
+				const wasEnabled = row?.value === 'true';
+				return { wasEnabled, enabled: wasEnabled, policy: savedPolicy };
+			}
+
 			const wasEnabled = (await this.lockSwitch(ctx)).value === 'true';
 			if (enabled) await assertCanEnable?.(ctx);
 			await this.settingsRepository.upsertByKey(ENABLED_KEY, enabled.toString(), true, ctx);
 
-			return { wasEnabled, enabled };
+			return { wasEnabled, enabled, policy: savedPolicy };
 		});
 
 		// After the commit, so that the cache never holds a value that is not saved.
-		await this.cacheService.set(ENABLED_KEY, enabled.toString());
+		if (enabled !== undefined) await this.cacheService.set(ENABLED_KEY, enabled.toString());
 
 		return result;
 	}
@@ -184,4 +225,51 @@ export class ScimSettingsService {
 			ctx,
 		);
 	}
+
+	private async mergeDeprovisioningPolicy(
+		{ onDelete, dataAction, transferProjectId }: Partial<ScimDeprovisioningPolicy>,
+		ctx: OperationContext,
+	): Promise<ScimDeprovisioningPolicy> {
+		if (onDelete === undefined && dataAction === undefined && transferProjectId === undefined) {
+			const row = await this.settingsRepository.findByKeyInContext(DEPROVISIONING_POLICY_KEY, ctx);
+			return parseDeprovisioningPolicy(row?.value);
+		}
+
+		const row = await this.settingsRepository.getOrCreateWithWriteLock(
+			DEPROVISIONING_POLICY_KEY,
+			JSON.stringify(DEFAULT_SCIM_DEPROVISIONING_POLICY),
+			false,
+			ctx,
+		);
+		const current = parseDeprovisioningPolicy(row.value);
+		const merged: ScimDeprovisioningPolicy = {
+			onDelete: onDelete ?? current.onDelete,
+			dataAction: dataAction ?? current.dataAction,
+			// `null` clears the target, so only `undefined` keeps it.
+			transferProjectId:
+				transferProjectId === undefined ? current.transferProjectId : transferProjectId,
+		};
+
+		await this.settingsRepository.upsertByKey(
+			DEPROVISIONING_POLICY_KEY,
+			JSON.stringify(merged),
+			false,
+			ctx,
+		);
+
+		return merged;
+	}
+}
+
+/**
+ * A missing value, or a value that does not parse, gives the default, which
+ * keeps the work of the user.
+ */
+function parseDeprovisioningPolicy(value: string | undefined): ScimDeprovisioningPolicy {
+	if (value === undefined) return { ...DEFAULT_SCIM_DEPROVISIONING_POLICY };
+
+	const parsed = scimDeprovisioningPolicySchema.safeParse(
+		jsonParse<unknown>(value, { fallbackValue: null }),
+	);
+	return parsed.success ? parsed.data : { ...DEFAULT_SCIM_DEPROVISIONING_POLICY };
 }

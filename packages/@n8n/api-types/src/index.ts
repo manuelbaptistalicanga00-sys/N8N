@@ -207,6 +207,7 @@ export {
 } from './schemas/credential-description.schema';
 export { CREDENTIAL_DESCRIPTIONS_FLAG } from './constants/credential-descriptions';
 export { EMPTY_CANVAS_GROUPS_FLAG } from './constants/empty-canvas-groups';
+export { SCIM_OPT_IN_FLAG, type ScimOptInSource } from './constants/scim';
 export type {
 	DependencyType,
 	DependencyResourceType,
@@ -1024,10 +1025,24 @@ export {
 export {
 	scimAuthFailureReasonSchema,
 	scimAuthFailureSchema,
+	scimDataActionSchema,
+	scimDeprovisioningPolicySchema,
+	scimOnDeleteSchema,
+	scimTransferTargetTypeSchema,
 	type ScimAuthFailureReason,
 	type ScimAuthFailure,
 	type ScimConnectionStatus,
 	type ScimTokenCreator,
 	type ScimTokenDetails,
 	type ScimConfigResponse,
+	type ScimConfigPatchResponse,
+	type ScimDataAction,
+	type ScimDeprovisioningPolicy,
+	type ScimOnDelete,
+	type ScimTransferTarget,
+	type ScimTransferTargetPerson,
+	type ScimTransferTargetProject,
+	type ScimTransferTargetSection,
+	type ScimTransferTargetType,
+	type ScimTransferTargetsResponse,
 } from './schemas/scim-config.schema';
