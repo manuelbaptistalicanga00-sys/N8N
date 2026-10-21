@@ -112,7 +112,7 @@ erDiagram
   varchar_36_ versionId
 }
 "agent_execution" {
-  BOOLEAN acceptsSteering
+  boolean acceptsSteering
   TEXT attachments
   TEXT author
   INTEGER completionTokens
