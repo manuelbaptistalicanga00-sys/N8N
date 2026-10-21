@@ -38,6 +38,19 @@ export interface ICredentialsOverwrite {
 	[key: string]: ICredentialDataDecryptedObject;
 }
 
+/** Client fields of one managed OAuth app, with the version that identifies it. */
+export type ManagedVersionEntry = ICredentialDataDecryptedObject & { version: number };
+
+/** An overwrite payload after parsing: the base entries and the newer app of each type in a rollout. */
+export interface ParsedCredentialsOverwrites {
+	entries: ICredentialsOverwrite;
+	/** Version of the base entry, for types that state one. A missing type means version 1. */
+	entryVersions: Record<string, number>;
+	versions: Record<string, ManagedVersionEntry>;
+	/** Parts of the payload that the parser skipped, each with the reason. */
+	problems: string[];
+}
+
 // ----------------------------------
 //               tags
 // ----------------------------------
