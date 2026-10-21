@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import type { CredentialTypeAvailabilityScope } from '@n8n/api-types';
+import type { CredentialTypeAvailability } from '@n8n/api-types';
 import { RestrictedNodePopover } from '@n8n/frontend-module-type-availability-policies';
 import { computed, useTemplateRef } from 'vue';
 
 defineProps<{
 	name: string;
-	scope?: CredentialTypeAvailabilityScope;
+	restriction?: CredentialTypeAvailability;
 }>();
 
 const emit = defineEmits<{ contactAdmin: [] }>();
@@ -22,7 +22,7 @@ const row = computed(() => rootRef.value?.closest<HTMLElement>('[role="menuitem"
 			side="right"
 			marker-size="xsmall"
 			:node-type-name="name"
-			:scope="scope"
+			:restriction="restriction"
 			:anchor="row"
 			@contact-admin="emit('contactAdmin')"
 		/>

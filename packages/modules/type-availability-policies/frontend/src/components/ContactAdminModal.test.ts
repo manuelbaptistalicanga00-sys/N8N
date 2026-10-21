@@ -7,6 +7,7 @@ import { setActivePinia } from 'pinia';
 import { describe, it, expect, vi } from 'vitest';
 
 import ContactAdminModal from './ContactAdminModal.vue';
+import { mockPolicyProject } from '../__tests__/mocks';
 
 vi.mock('@n8n/design-system', async (importOriginal) => {
 	const actual = await importOriginal<typeof import('@n8n/design-system')>();
@@ -105,5 +106,87 @@ describe('ContactAdminModal', () => {
 		const { findByTestId } = renderComponent();
 
 		expect(await findByTestId('contact-admin-empty')).toBeInTheDocument();
+	});
+
+	describe('for a project restriction', () => {
+		const projectAdmin = {
+			id: 'admin-1',
+			firstName: 'Grace',
+			lastName: 'Hopper',
+			email: 'grace@example.com',
+			role: 'project:admin',
+		};
+		const projectEditor = {
+			id: 'editor-1',
+			firstName: 'Alan',
+			lastName: 'Turing',
+			email: 'alan@example.com',
+			role: 'project:editor',
+		};
+
+		it('lists only the project admins with a mailto link', async () => {
+			const usersStore = setup([owner]);
+			mockPolicyProject({ type: 'team', relations: [projectAdmin, projectEditor] });
+			const { findByTestId, getByText } = renderComponent({
+				props: { open: true, nodeTypeName: 'Slack', audience: 'project' },
+			});
+
+			const list = await findByTestId('contact-admin-list');
+
+			expect(usersStore.fetchUsers).not.toHaveBeenCalled();
+			expect(getByText('Project admins')).toBeInTheDocument();
+			expect(list).toHaveTextContent('Grace Hopper');
+			expect(list).not.toHaveTextContent('Alan Turing');
+			expect(list).not.toHaveTextContent('Ada Lovelace');
+			expect(getByText('grace@example.com').closest('a')).toHaveAttribute(
+				'href',
+				'mailto:grace@example.com?subject=Access%20request%20for%20the%20Slack%20node',
+			);
+		});
+
+		it('lists the instance owners and admins when the project has no admin of its own', async () => {
+			setup([owner]);
+			mockPolicyProject({
+				type: 'team',
+				relations: [projectEditor],
+				implicitMembers: [
+					{
+						id: 'global-owner-1',
+						firstName: 'Katherine',
+						lastName: 'Johnson',
+						email: 'katherine@example.com',
+						globalRole: { slug: 'global:owner', displayName: 'Owner' },
+					},
+					{
+						id: 'global-admin-1',
+						firstName: 'Margaret',
+						lastName: 'Hamilton',
+						email: 'margaret@example.com',
+						globalRole: { slug: 'global:admin', displayName: 'Admin' },
+					},
+				],
+			});
+			const { findByTestId } = renderComponent({
+				props: { open: true, nodeTypeName: 'Slack', audience: 'project' },
+			});
+
+			const list = await findByTestId('contact-admin-list');
+
+			expect(list).toHaveTextContent('Katherine Johnson');
+			expect(list).toHaveTextContent('Margaret Hamilton');
+			expect(list).not.toHaveTextContent('Alan Turing');
+		});
+
+		it('falls back to a project hint when the project has no admin to list', async () => {
+			setup([owner]);
+			mockPolicyProject({ type: 'team', relations: [projectEditor] });
+			const { findByTestId } = renderComponent({
+				props: { open: true, nodeTypeName: 'Slack', audience: 'project' },
+			});
+
+			expect(await findByTestId('contact-admin-empty')).toHaveTextContent(
+				'No project admin is listed here.',
+			);
+		});
 	});
 });
