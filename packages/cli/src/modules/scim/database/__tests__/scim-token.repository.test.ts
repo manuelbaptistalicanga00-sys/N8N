@@ -1,5 +1,12 @@
 import type { TransactionRunner } from '@n8n/db';
-import { QueryFailedError, type DataSource, type EntityManager } from '@n8n/typeorm';
+import {
+	IsNull,
+	LessThan,
+	Or,
+	QueryFailedError,
+	type DataSource,
+	type EntityManager,
+} from '@n8n/typeorm';
 import { mock } from 'vitest-mock-extended';
 
 import { ScimTokenConflictError } from '../../scim.errors';
@@ -41,10 +48,43 @@ describe('ScimTokenRepository', () => {
 		expect(manager.findOneBy).toHaveBeenCalledWith(ScimToken, { slot: 'instance' });
 	});
 
+	it('reads the instance token with only the ID and name of its creator', async () => {
+		await repository.findInstanceTokenWithCreator(ctx);
+
+		expect(manager.findOne).toHaveBeenCalledWith(ScimToken, {
+			where: { slot: 'instance' },
+			relations: { createdBy: true },
+			select: expect.objectContaining({
+				tokenHint: true,
+				createdBy: { id: true, firstName: true, lastName: true },
+			}),
+		});
+	});
+
 	it('finds the token by its hash', async () => {
 		await repository.findByTokenHash('a-hash', ctx);
 
 		expect(manager.findOneBy).toHaveBeenCalledWith(ScimToken, { tokenHash: 'a-hash' });
+	});
+
+	it('checks if the instance token row exists', async () => {
+		manager.existsBy.mockResolvedValue(true);
+
+		await expect(repository.hasInstanceToken(ctx)).resolves.toBe(true);
+		expect(manager.existsBy).toHaveBeenCalledWith(ScimToken, { slot: 'instance' });
+	});
+
+	// The integration test runs this against a real database.
+	it('marks the token with the given hash as used, unless a later use is stored', async () => {
+		const at = new Date();
+
+		await repository.markUsed('a-hash', at, ctx);
+
+		expect(manager.update).toHaveBeenCalledWith(
+			ScimToken,
+			{ tokenHash: 'a-hash', lastUsedAt: Or(IsNull(), LessThan(at)) },
+			{ lastUsedAt: at },
+		);
 	});
 
 	it('revokes the instance token, whoever created it', async () => {

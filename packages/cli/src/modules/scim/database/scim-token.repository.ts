@@ -5,7 +5,7 @@ import {
 	type OperationContext,
 } from '@n8n/db';
 import { Service } from '@n8n/di';
-import { DataSource } from '@n8n/typeorm';
+import { DataSource, IsNull, LessThan, Or } from '@n8n/typeorm';
 
 import { ScimToken } from './scim-token.entity';
 import { ScimTokenConflictError } from '../scim.errors';
@@ -21,8 +21,44 @@ export class ScimTokenRepository extends BaseRepository<ScimToken> {
 		return await this.managerFor(ctx).findOneBy(ScimToken, { slot: 'instance' });
 	}
 
+	async hasInstanceToken(ctx: OperationContext) {
+		return await this.managerFor(ctx).existsBy(ScimToken, { slot: 'instance' });
+	}
+
+	/** The instance token with the ID and name of its creator, for display. */
+	async findInstanceTokenWithCreator(ctx: OperationContext) {
+		return await this.managerFor(ctx).findOne(ScimToken, {
+			where: { slot: 'instance' },
+			relations: { createdBy: true },
+			select: {
+				id: true,
+				tokenHint: true,
+				createdAt: true,
+				lastUsedAt: true,
+				createdById: true,
+				createdBy: { id: true, firstName: true, lastName: true },
+			},
+		});
+	}
+
 	async findByTokenHash(tokenHash: string, ctx: OperationContext) {
 		return await this.managerFor(ctx).findOneBy(ScimToken, { tokenHash });
+	}
+
+	/**
+	 * Sets the time of the last request that the token authenticated. The match
+	 * is on the token hash, so a write after a rotation does not mark the new
+	 * token as used.
+	 *
+	 * The write changes only an older time. Thus a write from another main, or
+	 * a slow commit, cannot move the time back.
+	 */
+	async markUsed(tokenHash: string, at: Date, ctx: OperationContext) {
+		await this.managerFor(ctx).update(
+			ScimToken,
+			{ tokenHash, lastUsedAt: Or(IsNull(), LessThan(at)) },
+			{ lastUsedAt: at },
+		);
 	}
 
 	/**
