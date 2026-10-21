@@ -1,9 +1,11 @@
 export { TypeAvailabilityPoliciesModule } from './type-availability-policies.module';
 export { useTypeAvailabilityPoliciesStore } from './type-availability-policies.store';
 export { SCOPE_LABEL_KEY, type RestrictedTypeKind } from './type-availability-policies.constants';
+export { useTypeAvailability } from './composables/useTypeAvailability';
 export {
 	describeNodeTypeRestriction,
 	describeRestrictedNodeTypes,
+	getCredentialTypeRestriction,
 	getNodeTypeRestriction,
 	isNodeTypeRestricted,
 	useNodeTypeRestriction,
