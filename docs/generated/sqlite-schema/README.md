@@ -131,6 +131,7 @@ Auto-generated from the SQLite migrations in @n8n/db. Do not edit by hand.
 | [role_scope](role_scope.md) | 2 |  | table |
 | [scheduled_job](scheduled_job.md) | 25 |  | table |
 | [scheduled_task](scheduled_task.md) | 19 |  | table |
+| [scim_token](scim_token.md) | 7 |  | table |
 | [scope](scope.md) | 3 |  | table |
 | [secrets_provider_connection](secrets_provider_connection.md) | 7 |  | table |
 | [self_healing_result](self_healing_result.md) | 15 |  | table |
@@ -368,6 +369,7 @@ erDiagram
 "role_scope" |o--|| "scope" : "FOREIGN KEY (scopeSlug) REFERENCES scope (slug) ON UPDATE CASCADE ON DELETE CASCADE MATCH NONE"
 "role_scope" |o--|| "role" : "FOREIGN KEY (roleSlug) REFERENCES role (slug) ON UPDATE CASCADE ON DELETE CASCADE MATCH NONE"
 "scheduled_task" }o--|| "scheduled_job" : "FOREIGN KEY (jobId) REFERENCES scheduled_job (id) ON UPDATE NO ACTION ON DELETE CASCADE MATCH NONE"
+"scim_token" }o--o| "user" : "FOREIGN KEY (createdById) REFERENCES user (id) ON UPDATE NO ACTION ON DELETE SET NULL MATCH NONE"
 "self_healing_result" }o--o| "user" : "FOREIGN KEY (dismissedById) REFERENCES user (id) ON UPDATE NO ACTION ON DELETE SET NULL MATCH NONE"
 "self_healing_result" }o--o| "workflow_suggestion" : "FOREIGN KEY (suggestionId) REFERENCES workflow_suggestion (id) ON UPDATE NO ACTION ON DELETE CASCADE MATCH NONE"
 "self_healing_result" }o--|| "user" : "FOREIGN KEY (backgroundUserId) REFERENCES user (id) ON UPDATE NO ACTION ON DELETE CASCADE MATCH NONE"
@@ -1680,6 +1682,15 @@ erDiagram
   varchar_16_ status
   varchar_128_ taskType
   INT timeoutSeconds
+}
+"scim_token" {
+  datetime_3_ createdAt
+  varchar createdById FK
+  INTEGER id
+  datetime_3_ lastUsedAt
+  varchar_16_ slot
+  varchar_64_ tokenHash
+  varchar_4_ tokenHint
 }
 "scope" {
   TEXT description

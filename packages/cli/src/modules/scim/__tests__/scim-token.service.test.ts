@@ -1,103 +1,155 @@
-import type { ApiKey, Role, User } from '@n8n/db';
+import type { User } from '@n8n/db';
 import type { Mocked } from 'vitest';
 import { mock } from 'vitest-mock-extended';
 
 import type { JwtService, UrlService } from '@n8n/backend-services';
 
-import type { ScimApiKeyRepository } from '../database/scim-api-key.repository';
-import { ScimTokenService } from '../scim-token.service';
+import type { ScimToken } from '../database/scim-token.entity';
+import type { ScimTokenRepository } from '../database/scim-token.repository';
+import { hashScimToken, ScimTokenService } from '../scim-token.service';
+import { ScimTokenConflictError } from '../scim.errors';
 
 describe('ScimTokenService', () => {
-	let apiKeyRepository: Mocked<ScimApiKeyRepository>;
+	let scimTokenRepository: Mocked<ScimTokenRepository>;
 	let jwtService: Mocked<JwtService>;
 	let urlService: Mocked<UrlService>;
 	let service: ScimTokenService;
 
-	const roleWithScopes = (...scopes: string[]) =>
-		({ slug: 'global:admin', scopes: scopes.map((slug) => ({ slug })) }) as Role;
+	const user = mock<User>({ id: 'user-1' });
 
-	const createUser = (overrides: Partial<User> = {}) =>
-		({ id: 'user-1', disabled: false, role: roleWithScopes('scim:manage'), ...overrides }) as User;
-
-	const createApiKey = (overrides: Partial<ApiKey> = {}): ApiKey =>
+	const createToken = (overrides: Partial<ScimToken> = {}): ScimToken =>
 		({
-			id: 'key-1',
-			userId: 'user-1',
-			apiKey: 'a-very-long-scim-token-value',
-			audience: 'scim-api',
-			user: createUser(),
+			id: 1,
+			slot: 'instance',
+			tokenHash: hashScimToken('a-very-long-scim-token-value'),
+			tokenHint: 'alue',
+			createdById: 'user-1',
+			lastUsedAt: null,
+			createdAt: new Date(),
 			...overrides,
-		}) as ApiKey;
+		}) as ScimToken;
 
 	beforeEach(() => {
-		apiKeyRepository = mock<ScimApiKeyRepository>();
+		scimTokenRepository = mock<ScimTokenRepository>();
 		jwtService = mock<JwtService>();
 		urlService = mock<UrlService>();
-		service = new ScimTokenService(apiKeyRepository, jwtService, urlService);
+		jwtService.sign.mockReturnValue('signed-token');
+		service = new ScimTokenService(scimTokenRepository, jwtService, urlService);
 	});
 
 	describe('verifyApiKey', () => {
-		it('should accept a valid token belonging to an active user', async () => {
-			apiKeyRepository.findByKey.mockResolvedValue(createApiKey());
+		it('accepts a valid token that is the stored instance token', async () => {
+			scimTokenRepository.findByTokenHash.mockResolvedValue(createToken());
 
 			await expect(service.verifyApiKey('token')).resolves.toBe(true);
 
 			expect(jwtService.verify).toHaveBeenCalledWith('scimApiKey', 'token', { issuer: 'n8n' });
-			expect(apiKeyRepository.findByKey).toHaveBeenCalledWith('token', {});
+			// The database keeps only the hash of the token.
+			expect(scimTokenRepository.findByTokenHash).toHaveBeenCalledWith(hashScimToken('token'), {});
 		});
 
-		it('should reject a token that fails JWT verification', async () => {
+		it('accepts the token after its creator was deleted', async () => {
+			scimTokenRepository.findByTokenHash.mockResolvedValue(createToken({ createdById: null }));
+
+			await expect(service.verifyApiKey('token')).resolves.toBe(true);
+		});
+
+		it('rejects a token that fails JWT verification', async () => {
 			jwtService.verify.mockImplementation(() => {
 				throw new Error('jwt expired');
 			});
 
 			await expect(service.verifyApiKey('token')).resolves.toBe(false);
-			expect(apiKeyRepository.findByKey).not.toHaveBeenCalled();
+			expect(scimTokenRepository.findByTokenHash).not.toHaveBeenCalled();
 		});
 
-		it('should reject a token that is not stored in the database', async () => {
-			apiKeyRepository.findByKey.mockResolvedValue(null);
+		it('rejects a token that is not the stored instance token', async () => {
+			scimTokenRepository.findByTokenHash.mockResolvedValue(null);
 
 			await expect(service.verifyApiKey('token')).resolves.toBe(false);
 		});
 
 		it('propagates a repository failure instead of reporting an invalid token', async () => {
-			apiKeyRepository.findByKey.mockRejectedValue(new Error('db down'));
+			scimTokenRepository.findByTokenHash.mockRejectedValue(new Error('db down'));
 
 			await expect(service.verifyApiKey('token')).rejects.toThrow('db down');
 		});
+	});
 
-		it('should reject a token whose owner is disabled', async () => {
-			apiKeyRepository.findByKey.mockResolvedValue(
-				createApiKey({ user: createUser({ disabled: true }) }),
-			);
+	describe('getTokenInfo', () => {
+		it('returns the last four characters of the instance token', async () => {
+			scimTokenRepository.findInstanceToken.mockResolvedValue(createToken());
 
-			await expect(service.verifyApiKey('token')).resolves.toBe(false);
+			await expect(service.getTokenInfo()).resolves.toEqual({
+				hasToken: true,
+				lastFour: 'alue',
+			});
 		});
 
-		it('should reject a token whose owner no longer has scim:manage', async () => {
-			apiKeyRepository.findByKey.mockResolvedValue(
-				createApiKey({ user: createUser({ role: roleWithScopes('workflow:read') }) }),
-			);
+		it('reports no token when the instance has none', async () => {
+			scimTokenRepository.findInstanceToken.mockResolvedValue(null);
 
-			await expect(service.verifyApiKey('token')).resolves.toBe(false);
+			await expect(service.getTokenInfo()).resolves.toEqual({ hasToken: false, lastFour: null });
 		});
 	});
 
-	describe('findScimApiKeyForUser', () => {
-		it('should return the existing key redacted', async () => {
-			apiKeyRepository.findByUserId.mockResolvedValue(createApiKey());
+	it('stores no token value, only a hex SHA-256 hash', () => {
+		// The SHA-256 digest of 'token', from `printf token | shasum -a 256`.
+		expect(hashScimToken('token')).toBe(
+			'3c469e9d6c5875d37a43f353d4f88e61fcf812c66eee3457465a40b0da4153e0',
+		);
+		expect(hashScimToken('token-a')).not.toBe(hashScimToken('token-b'));
+	});
 
-			const result = await service.findScimApiKeyForUser(mock<User>({ id: 'user-1' }));
+	describe('rotateToken', () => {
+		it('replaces the current token with a token whose subject names no user', async () => {
+			jwtService.sign.mockReturnValue('signed-token-wxyz');
+			scimTokenRepository.findInstanceToken.mockResolvedValue(
+				createToken({ tokenHash: hashScimToken('old-token') }),
+			);
 
-			expect(result?.apiKey).not.toBe('a-very-long-scim-token-value');
-			expect(result?.apiKey).toMatch(/^\*+.{4}$/);
+			// The value leaves the service only here, once.
+			await expect(service.rotateToken(user)).resolves.toBe('signed-token-wxyz');
+
+			expect(scimTokenRepository.replace).toHaveBeenCalledWith(
+				hashScimToken('old-token'),
+				{
+					tokenHash: hashScimToken('signed-token-wxyz'),
+					tokenHint: 'wxyz',
+					createdById: 'user-1',
+				},
+				{},
+			);
+			const [purpose, payload] = jwtService.sign.mock.calls[0];
+			expect(purpose).toBe('scimApiKey');
+			expect(payload).toEqual(
+				expect.objectContaining({ sub: 'scim-provisioning', iss: 'n8n', jti: expect.any(String) }),
+			);
 		});
 
-		it('should return null when the user has no SCIM token', async () => {
-			apiKeyRepository.findByUserId.mockResolvedValue(null);
+		it('creates the first token when the instance has none', async () => {
+			scimTokenRepository.findInstanceToken.mockResolvedValue(null);
 
-			expect(await service.findScimApiKeyForUser(mock<User>({ id: 'user-1' }))).toBeNull();
+			await service.rotateToken(user);
+
+			expect(scimTokenRepository.replace).toHaveBeenCalledWith(
+				null,
+				expect.objectContaining({ tokenHash: hashScimToken('signed-token') }),
+				{},
+			);
 		});
+
+		it('propagates a conflict with a concurrent rotation', async () => {
+			scimTokenRepository.findInstanceToken.mockResolvedValue(createToken());
+			scimTokenRepository.replace.mockRejectedValue(new ScimTokenConflictError());
+
+			await expect(service.rotateToken(user)).rejects.toThrow(ScimTokenConflictError);
+		});
+	});
+
+	it('revokes the instance token', async () => {
+		await service.revokeToken();
+
+		expect(scimTokenRepository.deleteInstanceToken).toHaveBeenCalledWith({});
 	});
 });
