@@ -47,8 +47,13 @@ describe('OdooV2 — custom:getAll', () => {
 			...overrides,
 		};
 		exec.getInputData.mockReturnValue([{ json: {} }]);
-		// eslint-disable-next-line @typescript-eslint/no-unsafe-return
-		exec.getNodeParameter.mockImplementation((key: string) => params[key] as any);
+		exec.getNodeParameter.mockImplementation((key, _itemIndex, fallbackValue) => {
+			const value = params[key] === undefined ? fallbackValue : params[key];
+			if (value === undefined) {
+				throw new Error(`Could not get parameter "${key}"`);
+			}
+			return value as ReturnType<IExecuteFunctions['getNodeParameter']>;
+		});
 	};
 
 	it('returns records with a limit when returnAll is false', async () => {
@@ -153,6 +158,82 @@ describe('OdooV2 — custom:getAll', () => {
 				['name', '=', 'Record A'],
 				['email', 'like', 'foo'],
 			],
+			fields: [],
+			limit: 10,
+			offset: 0,
+		});
+	});
+
+	// NODE-6026: Older workflows store custom-model filters under filterRequest.
+	it.each(['filters', 'filterRequest'])(
+		'sends the display_name condition stored in %s when no records match',
+		async (filterParameter) => {
+			setupParams({
+				customResource: 'stock.valuation.layer',
+				filters: {},
+				[filterParameter]: {
+					filter: [{ fieldName: 'display_name', operator: 'equal', value: 'voeinrwoevin' }],
+				},
+			});
+			(transport.odooApiRequest as Mock).mockResolvedValue([]);
+
+			const result = await node.execute.call(exec);
+
+			expect(transport.odooApiRequest).toHaveBeenCalledExactlyOnceWith(
+				'stock.valuation.layer',
+				'search_read',
+				{
+					domain: [['display_name', '=', 'voeinrwoevin']],
+					fields: [],
+					limit: 10,
+					offset: 0,
+				},
+			);
+			expect(result).toEqual([[]]);
+		},
+	);
+
+	it.each([undefined, { filter: [] }])(
+		'uses saved filterRequest conditions when filters is %j',
+		async (filters) => {
+			setupParams({
+				filters,
+				filterRequest: {
+					filter: [{ fieldName: 'name', operator: 'equal', value: 'Record A' }],
+				},
+			});
+			(transport.odooApiRequest as Mock).mockResolvedValue(MOCK_RECORDS);
+
+			await node.execute.call(exec);
+
+			expect(transport.odooApiRequest).toHaveBeenCalledExactlyOnceWith(
+				'res.partner',
+				'search_read',
+				{
+					domain: [['name', '=', 'Record A']],
+					fields: [],
+					limit: 10,
+					offset: 0,
+				},
+			);
+		},
+	);
+
+	it('uses current filters when both filter parameters contain conditions', async () => {
+		setupParams({
+			filters: {
+				filter: [{ fieldName: 'name', operator: 'equal', value: 'Record A' }],
+			},
+			filterRequest: {
+				filter: [{ fieldName: 'name', operator: 'equal', value: 'Record B' }],
+			},
+		});
+		(transport.odooApiRequest as Mock).mockResolvedValue(MOCK_RECORDS);
+
+		await node.execute.call(exec);
+
+		expect(transport.odooApiRequest).toHaveBeenCalledExactlyOnceWith('res.partner', 'search_read', {
+			domain: [['name', '=', 'Record A']],
 			fields: [],
 			limit: 10,
 			offset: 0,
