@@ -4,11 +4,7 @@ import type { SpanJSON, TracesSamplerSamplingContext, TransactionEvent } from '@
  * Express auto-instrumentation span ops whose duration only mirrors the
  * handler, so they carry no independent signal. Dropped wholesale.
  */
-const DROPPED_EXPRESS_OPS = new Set([
-	'middleware.express',
-	'router.express',
-	'request_handler.express',
-]);
+const DROPPED_EXPRESS_OPS = new Set(['middleware', 'router', 'handler']);
 
 /** High-volume auto-instrumentation ops kept only when slow or errored. */
 const DURATION_FILTERED_OPS = new Set(['db', 'http.client']);
@@ -64,7 +60,7 @@ export function shouldIgnoreOutgoingRequest(url: string): boolean {
 }
 
 /** A span errored unless Sentry explicitly marked it ok. */
-function isErrored(status: SpanJSON['status']): boolean {
+function isErrored(status: string | undefined): boolean {
 	return status !== undefined && status !== 'ok';
 }
 
@@ -82,12 +78,7 @@ function shouldKeepSpan(span: SpanJSON, slowSpanThresholdMs: number): boolean {
 	return true;
 }
 
-/**
- * Whether a transaction is a successful (non-errored) production webhook request.
- * Sentry names Express transactions by route pattern, e.g. `POST /webhook/*path`,
- * so we match on the configured webhook endpoint. `webhook-test`/`webhook-waiting`
- * are deliberately excluded (only production webhooks are high-volume).
- */
+/** Whether a transaction is a successful production webhook. Test and waiting webhooks don't match. */
 function isSuccessfulWebhook(event: TransactionEvent, webhookEndpoint: string): boolean {
 	if (isErrored(event.contexts?.trace?.status)) return false;
 
