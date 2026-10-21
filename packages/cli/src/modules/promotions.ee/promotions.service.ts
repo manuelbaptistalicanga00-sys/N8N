@@ -97,7 +97,7 @@ const IMPORT_POLICY: Omit<ImportRequest, 'user'> = {
 	missingNodeTypeMode: MissingNodeTypeMode.Fail,
 	credentialMatchingMode: 'id-only',
 	credentialMissingMode: 'must-preexist',
-	credentialConflictPolicy: CredentialConflictPolicy.KeepExisting,
+	credentialConflictPolicy: CredentialConflictPolicy.Overwrite,
 	folderConflictPolicy: FolderConflictPolicy.Overwrite,
 	overwriteDeletionPolicy: OverwriteDeletionPolicy.HardDelete,
 	dataTableMatchingMode: 'by-id',
@@ -751,6 +751,7 @@ export class PromotionsService {
 				dataTableSchemaConflictPolicy: confirmDestructiveChanges
 					? DataTableSchemaConflictPolicy.Overwrite
 					: IMPORT_POLICY.dataTableSchemaConflictPolicy,
+				credentialConflictPolicy: IMPORT_POLICY.credentialConflictPolicy,
 			},
 			{ sourceDir: packageFolder },
 			selection,
@@ -1085,6 +1086,7 @@ export class PromotionsService {
 			credentials: {
 				matched: importResult.credentials.matched.length,
 				stubbed: importResult.credentials.stubbed.length,
+				updated: importResult.credentials.updated.length,
 			},
 			dataTables: {
 				matched: importResult.dataTables.matched,
