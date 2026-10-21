@@ -269,6 +269,7 @@ describe('N8nMemoryImpl', () => {
 		const entry = await store.episodic.saveEntryWithSources(
 			{
 				resourceId: scope.resourceId,
+				episodic: scope.episodic,
 				content,
 				embedding: [1, 0],
 				embeddingModel: 'test-model',
@@ -335,12 +336,16 @@ describe('N8nMemoryImpl', () => {
 				resourceId: 'user-2',
 				threadId: 'thread-2',
 			});
-			const integrationScope = { resourceId: 'integration:slack:U_ALICE', threadId: 'shared-1' };
-			const { entry: shared } = await captureEntry(memory, integrationScope);
-			const { entry: otherThread } = await captureEntry(memory, {
-				...integrationScope,
-				threadId: 'shared-2',
+			const sharedThread = (threadId: string, resourceId = 'integration:slack:U_ALICE') => ({
+				resourceId,
+				threadId,
+				episodic: {
+					writeScopeId: `thread:${threadId}`,
+					readScopeIds: [resourceId, `thread:${threadId}`],
+				},
 			});
+			const { entry: shared } = await captureEntry(memory, sharedThread('shared-1'));
+			const { entry: otherThread } = await captureEntry(memory, sharedThread('shared-2'));
 			await entryRepository.update(owned.id, { status: 'dropped' });
 			await entryRepository.update(shared.id, {
 				status: 'superseded',
@@ -360,19 +365,52 @@ describe('N8nMemoryImpl', () => {
 			).resolves.toEqual([expect.objectContaining({ id: otherResource.id })]);
 			await expect(
 				memory.episodic.getEntriesByContentHashes(
-					{ ...integrationScope, resourceId: 'integration:slack:U_BOB' },
+					sharedThread('shared-1', 'integration:slack:U_BOB'),
 					[owned.contentHash],
 				),
 			).resolves.toEqual([expect.objectContaining({ id: shared.id, status: 'superseded' })]);
 			await expect(
-				memory.episodic.getEntriesByContentHashes({ ...integrationScope, threadId: 'shared-2' }, [
-					owned.contentHash,
-				]),
+				memory.episodic.getEntriesByContentHashes(sharedThread('shared-2'), [owned.contentHash]),
 			).resolves.toEqual([expect.objectContaining({ id: otherThread.id })]);
 			await expect(
 				memory.episodic.getEntriesByContentHashes(scope, ['missing-hash']),
 			).resolves.toEqual([]);
 			await expect(memory.episodic.getEntriesByContentHashes(scope, [])).resolves.toEqual([]);
+		});
+
+		it('isolates entries and pending candidates by the resolved scope instead of the thread', async () => {
+			const inChannel = (channelId: string, threadId: string) => ({
+				resourceId: 'integration:slack:U_ALICE',
+				threadId,
+				episodic: {
+					writeScopeId: `slack:T1:channel:${channelId}`,
+					readScopeIds: [`slack:T1:channel:${channelId}`],
+				},
+			});
+			const first = inChannel('C1', 'thread-a');
+			const second = inChannel('C1', 'thread-b');
+			const other = inChannel('C2', 'thread-c');
+			await captureEntry(memory, first, 'Channel one chose Postgres.', {
+				episodic: first.episodic,
+			});
+			await captureEntry(memory, second, 'Channel one wants weekly reports.', {
+				episodic: second.episodic,
+			});
+			await captureEntry(memory, other, 'Channel two chose MySQL.', { episodic: other.episodic });
+
+			const recalled = async (scope: typeof first) =>
+				(await memory.episodic.searchEntries(scope, 'Channel'))
+					.map(({ content }) => content)
+					.sort();
+
+			await expect(recalled(first)).resolves.toEqual([
+				'Channel one chose Postgres.',
+				'Channel one wants weekly reports.',
+			]);
+			await expect(recalled(second)).resolves.toEqual(await recalled(first));
+			await expect(recalled(other)).resolves.toEqual(['Channel two chose MySQL.']);
+			await expect(memory.episodic.getPendingCaptureCandidates(first)).resolves.toHaveLength(2);
+			await expect(memory.episodic.getPendingCaptureCandidates(other)).resolves.toHaveLength(1);
 		});
 
 		it.each([
