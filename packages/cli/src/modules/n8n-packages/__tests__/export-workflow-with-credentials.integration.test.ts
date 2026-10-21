@@ -101,6 +101,43 @@ describe('workflow package export — with credentials', () => {
 		expect(Object.keys(parsed).sort()).toEqual(['id', 'name', 'type']);
 	});
 
+	it('writes the current credential name into the workflow JSON, not the stale node name', async () => {
+		const owner = await createOwner();
+		const project = await createTeamProject('Project A', owner);
+		const credential = await saveCredential(
+			{
+				name: 'Renamed credential',
+				type: 'httpHeaderAuth',
+				data: { name: 'X-Auth', value: 'secret' },
+			},
+			{ project, role: 'credential:owner' },
+		);
+		// The node still carries the pre-rename label the workflow was saved with.
+		const workflow = await buildWorkflowReferencingCredentialById({
+			name: 'Workflow with stale cred name',
+			project,
+			credentialId: credential.id,
+			credentialName: 'Old credential name',
+			credentialType: credential.type,
+		});
+
+		const { stream } = await service.exportPackage({ user: owner, workflowIds: [workflow.id] });
+		const { manifest, entries } = await readExport(stream);
+
+		const workflowFile = entries.find(
+			(e) => e.name === `${manifest.workflows![0].target}/workflow.json`,
+		);
+		expect(workflowFile).toBeDefined();
+		const parsedWorkflow = jsonParse<{
+			nodes: Array<{ credentials?: Record<string, { id: string; name: string }> }>;
+		}>(workflowFile!.content.toString());
+
+		expect(parsedWorkflow.nodes[0].credentials?.httpHeaderAuth).toEqual({
+			id: credential.id,
+			name: 'Renamed credential',
+		});
+	});
+
 	it('bundles expression values from credential data under the default policy', async () => {
 		const owner = await createOwner();
 		const project = await createTeamProject('Project A', owner);

@@ -1,3 +1,4 @@
+import { CredentialsFinderService } from '@n8n/backend-services';
 import type { User, WorkflowEntity } from '@n8n/db';
 import { Service } from '@n8n/di';
 
@@ -11,6 +12,7 @@ import type { ExportVersionPolicy } from '../../n8n-packages.types';
 import type { ManifestEntry } from '../../spec/manifest.schema';
 import { CredentialRequirementsExtractor } from '../credential/credential-requirements.extractor';
 import type { WorkflowCredentialRequirement } from '../credential/credential.types';
+import { visitWorkflowCredentials } from '../credential/workflow-credential-references';
 import { DataTableRequirementsExtractor } from '../data-table/data-table-requirements.extractor';
 import type { WorkflowDataTableRequirement } from '../data-table/data-table.types';
 import type { NodeTypeSource } from './node-type-usage';
@@ -49,6 +51,7 @@ export class WorkflowExporter {
 		private readonly dataTableRequirementsExtractor: DataTableRequirementsExtractor,
 		private readonly variableRequirementsExtractor: VariableRequirementsExtractor,
 		private readonly tagRequirementsExtractor: TagRequirementsExtractor,
+		private readonly credentialsFinder: CredentialsFinderService,
 	) {}
 
 	async export(request: WorkflowExportRequest): Promise<WorkflowExportResult> {
@@ -74,6 +77,9 @@ export class WorkflowExporter {
 			request.workflowIds,
 			applyWorkflowVersionPolicy(workflows, request.versionPolicy),
 		);
+
+		await this.refreshCredentialNames(workflowsForExport);
+
 		const entries: ManifestEntry[] = [];
 		const credentials: WorkflowCredentialRequirement[] = [];
 		const dataTables: WorkflowDataTableRequirement[] = [];
@@ -101,6 +107,39 @@ export class WorkflowExporter {
 		}
 
 		return { entries, requirements: { credentials, dataTables, variables, tags, nodeTypes } };
+	}
+
+	/**
+	 * A node keeps the credential name from its last save, so a later rename never
+	 * reaches it. Refresh each reference to the stored name before serializing, so
+	 * the workflow JSON matches the credential file. Orphans keep their node name.
+	 */
+	private async refreshCredentialNames(workflows: WorkflowEntity[]): Promise<void> {
+		const credentialIds = new Set<string>();
+		for (const workflow of workflows) {
+			visitWorkflowCredentials(workflow.nodes, (_type, details) => {
+				if (details.id) credentialIds.add(details.id);
+				return false;
+			});
+		}
+		if (credentialIds.size === 0) return;
+
+		const described = await this.credentialsFinder.describeCredentials([...credentialIds]);
+		const nameById = new Map(
+			described
+				.filter((credential) => credential.exists)
+				.map((credential) => [credential.id, credential.name]),
+		);
+
+		for (const workflow of workflows) {
+			visitWorkflowCredentials(workflow.nodes, (_type, details) => {
+				if (!details.id) return false;
+				const currentName = nameById.get(details.id);
+				if (currentName === undefined || currentName === details.name) return false;
+				details.name = currentName;
+				return true;
+			});
+		}
 	}
 
 	private orderWorkflowsByRequest(
