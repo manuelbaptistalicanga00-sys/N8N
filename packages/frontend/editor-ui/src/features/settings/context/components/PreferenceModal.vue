@@ -20,6 +20,7 @@ import type { IconOrEmoji } from '@n8n/design-system';
 import { useUsersStore } from '@n8n/stores/users.store';
 import type { Rule, RuleGroup } from '@/Interface';
 
+import type { PreferenceExample } from '@/experiments/preferencesEmptyState/preferenceExamples';
 import { DEFAULT_PROJECT_ICON } from '@/features/collaboration/projects/projects.constants';
 import { useProjectsStore } from '@/features/collaboration/projects/projects.store';
 
@@ -40,6 +41,7 @@ import {
 const props = defineProps<{
 	open: boolean;
 	preference: Preference | null;
+	example?: PreferenceExample;
 }>();
 
 const emit = defineEmits<{
@@ -97,7 +99,7 @@ const form = reactive({
 
 function resetForm() {
 	initialScope.value = initialScopeValue();
-	form.content = preference.value?.content ?? '';
+	form.content = preference.value?.content ?? props.example?.content ?? '';
 	form.scope = initialScope.value;
 	contentValid.value = false;
 }
@@ -257,6 +259,7 @@ async function handleSubmit() {
 				scope_type: scope,
 				text_length: content.length,
 				...(projectId ? { project_id: projectId } : {}),
+				...(props.example ? { example_id: props.example.id } : {}),
 			});
 		} else if (preference.value) {
 			await contextStore.updatePreference(preference.value.id, payload);
@@ -294,6 +297,7 @@ watch(
 		telemetry.track(TELEMETRY_EVENT.CONTEXT.USER_OPENED_PREFERENCE_MODAL, {
 			mode: mode.value,
 			...(preference.value ? { scope_type: preferenceScope(preference.value) } : {}),
+			...(props.example ? { example_id: props.example.id } : {}),
 		});
 		void projectsStore.getMyProjects();
 	},
@@ -305,6 +309,11 @@ watch(
 	<N8nDialog
 		:open="open"
 		:header="modalTitle"
+		:description="
+			example
+				? i18n.baseText('experiments.preferencesEmptyState.examples.modalDescription')
+				: undefined
+		"
 		size="medium"
 		:disable-outside-pointer-events="true"
 		data-test-id="preference-modal"
